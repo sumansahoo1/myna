@@ -14,6 +14,9 @@ class Settings:
     database_url: str = DATABASE_URL
     video_storage_dir: Path = VIDEOS_DIR
     allowed_extensions: set = ALLOWED_VIDEO_EXTENSIONS
+    transcriber_provider: str = "local"  # "local" | "hosted"
+    whisper_model: str = "small"  # tiny|base|small|medium|large-v3
+    whisper_device: str = "cpu"  # cpu|cuda
 
 
 settings = Settings()

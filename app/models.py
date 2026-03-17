@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, DateTime
+from sqlalchemy import Column, String, DateTime, Text
 from sqlalchemy.sql import func
 
 from .database import Base
@@ -10,4 +10,8 @@ class Meeting(Base):
     meeting_id = Column(String(36), primary_key=True, index=True)
     video_id = Column(String(36), unique=True, nullable=False)
     filename = Column(String(255), nullable=False)
+    transcription_status = Column(String(20), nullable=False, default="pending")
+    transcript_text = Column(Text, nullable=True)
+    transcript_language = Column(String(16), nullable=True)
+    transcript_error = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
