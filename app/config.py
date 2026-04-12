@@ -17,6 +17,8 @@ class Settings:
     transcriber_provider: str = "local"  # "local" | "hosted"
     whisper_model: str = "small"  # tiny|base|small|medium|large-v3
     whisper_device: str = "cpu"  # cpu|cuda
+    diarizer_provider: str = "local"  # "local" | "hosted"
+    hf_token: str | None = None  # HuggingFace token for pyannote models
 
 
 settings = Settings()

@@ -12,11 +12,13 @@ _MEETINGS_MIGRATIONS = [
     ("transcript_text", "TEXT"),
     ("transcript_language", "TEXT"),
     ("transcript_error", "TEXT"),
+    ("diarization_status", "TEXT NOT NULL DEFAULT 'pending'"),
+    ("diarization_error", "TEXT"),
 ]
 
 
 def init_db():
-    from app.models import Meeting  # noqa: F401 - registers model with Base
+    from app.models import Meeting, TranscriptSegment  # noqa: F401 - registers models with Base
     from app.config import BASE_DIR
     (BASE_DIR / "storage" / "videos").mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(bind=engine)

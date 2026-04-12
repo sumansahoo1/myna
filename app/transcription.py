@@ -3,20 +3,28 @@ from __future__ import annotations
 import os
 import subprocess
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.config import settings
 
 
 @dataclass(frozen=True)
+class TranscriptSegment:
+    start_sec: float
+    end_sec: float
+    text: str
+
+
+@dataclass
 class TranscriptResult:
     text: str
     language: str | None = None
+    segments: list[TranscriptSegment] = field(default_factory=list)
 
 
 class Transcriber:
-    def transcribe(self, video_path: Path) -> TranscriptResult:
+    def transcribe(self, audio_path: Path) -> TranscriptResult:
         raise NotImplementedError
 
 
@@ -33,7 +41,7 @@ def get_transcriber() -> Transcriber:
 
 
 class HostedTranscriberStub(Transcriber):
-    def transcribe(self, video_path: Path) -> TranscriptResult:
+    def transcribe(self, audio_path: Path) -> TranscriptResult:
         raise RuntimeError(
             "Hosted transcription provider is not configured yet. "
             "Set TRANSCRIBER_PROVIDER=local to use local transcription."
@@ -53,16 +61,28 @@ class LocalFasterWhisperTranscriber(Transcriber):
             self._model = WhisperModel(self._model_name, device=self._device)
         return self._model
 
-    def transcribe(self, video_path: Path) -> TranscriptResult:
-        audio_path = _extract_audio_to_wav(video_path)
-        try:
-            model = self._get_model()
-            segments, info = model.transcribe(str(audio_path))
-            text = " ".join(seg.text.strip() for seg in segments).strip()
-            language = getattr(info, "language", None)
-            return TranscriptResult(text=text, language=language)
-        finally:
-            audio_path.unlink(missing_ok=True)
+    def transcribe(self, audio_path: Path) -> TranscriptResult:
+        model = self._get_model()
+        raw_segments, info = model.transcribe(str(audio_path), word_timestamps=False)
+
+        segments: list[TranscriptSegment] = []
+        parts: list[str] = []
+        for seg in raw_segments:
+            txt = seg.text.strip()
+            if not txt:
+                continue
+            segments.append(TranscriptSegment(
+                start_sec=round(seg.start, 3),
+                end_sec=round(seg.end, 3),
+                text=txt,
+            ))
+            parts.append(txt)
+
+        return TranscriptResult(
+            text=" ".join(parts),
+            language=getattr(info, "language", None),
+            segments=segments,
+        )
 
 
 def _extract_audio_to_wav(video_path: Path) -> Path:

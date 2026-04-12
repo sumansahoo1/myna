@@ -9,6 +9,7 @@ class TranscriptionStatus:
     completed = "completed"
     failed = "failed"
 
+
 class MeetingCreate(BaseModel):
     meeting_id: str
     video_id: str
@@ -20,6 +21,7 @@ class MeetingResponse(BaseModel):
     video_id: str
     filename: str
     transcription_status: str | None = None
+    diarization_status: str | None = None
     created_at: datetime | None = None
 
     class Config:
@@ -38,3 +40,21 @@ class TranscriptResponse(BaseModel):
     language: str | None = None
     transcript_text: str | None = None
     error: str | None = None
+
+
+class SegmentResponse(BaseModel):
+    id: int
+    start_sec: float
+    end_sec: float
+    speaker_label: str | None = None
+    text: str
+
+    class Config:
+        from_attributes = True
+
+
+class SegmentsListResponse(BaseModel):
+    meeting_id: str
+    transcription_status: str
+    diarization_status: str
+    segments: list[SegmentResponse]

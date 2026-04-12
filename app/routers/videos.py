@@ -7,9 +7,18 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
-from app.models import Meeting
-from app.schemas import MeetingResponse, TranscriptResponse, TranscriptionStatus, VideoUploadResponse
-from app.transcription import get_transcriber
+from app.diarization import get_diarizer
+from app.merge import assign_speakers
+from app.models import Meeting, TranscriptSegment as SegmentModel
+from app.schemas import (
+    MeetingResponse,
+    SegmentResponse,
+    SegmentsListResponse,
+    TranscriptResponse,
+    TranscriptionStatus,
+    VideoUploadResponse,
+)
+from app.transcription import get_transcriber, _extract_audio_to_wav
 
 router = APIRouter()
 
@@ -59,12 +68,13 @@ async def upload_video(
         video_id=video_id,
         filename=stored_filename,
         transcription_status=TranscriptionStatus.pending,
+        diarization_status=TranscriptionStatus.pending,
     )
     db.add(meeting)
     db.commit()
     db.refresh(meeting)
 
-    background_tasks.add_task(_transcribe_meeting_video, meeting_id)
+    background_tasks.add_task(_process_meeting_video, meeting_id)
 
     return VideoUploadResponse(meeting_id=meeting_id, video_id=video_id)
 
@@ -92,34 +102,99 @@ def get_transcript(meeting_id: str, db: Session = Depends(get_db)):
     )
 
 
-def _transcribe_meeting_video(meeting_id: str) -> None:
-    transcriber = get_transcriber()
+@router.get("/meetings/{meeting_id}/segments", response_model=SegmentsListResponse)
+def get_segments(meeting_id: str, db: Session = Depends(get_db)):
+    meeting = db.query(Meeting).filter(Meeting.meeting_id == meeting_id).first()
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
 
+    segments = (
+        db.query(SegmentModel)
+        .filter(SegmentModel.meeting_id == meeting_id)
+        .order_by(SegmentModel.start_sec)
+        .all()
+    )
+
+    return SegmentsListResponse(
+        meeting_id=meeting_id,
+        transcription_status=meeting.transcription_status,
+        diarization_status=meeting.diarization_status,
+        segments=[
+            SegmentResponse(
+                id=seg.id,
+                start_sec=seg.start_sec,
+                end_sec=seg.end_sec,
+                speaker_label=seg.speaker_label,
+                text=seg.text,
+            )
+            for seg in segments
+        ],
+    )
+
+
+def _process_meeting_video(meeting_id: str) -> None:
+    """
+    Background pipeline:
+      1. Extract audio once
+      2. Transcribe (faster-whisper) → timestamped segments
+      3. Diarize (pyannote) → speaker turns
+      4. Merge → assign speakers to segments
+      5. Persist results
+    """
     db = next(get_db())
+    audio_path = None
+
     try:
         meeting = db.query(Meeting).filter(Meeting.meeting_id == meeting_id).first()
         if not meeting:
             return
 
-        if meeting.transcription_status in (TranscriptionStatus.processing, TranscriptionStatus.completed):
-            return
-
         meeting.transcription_status = TranscriptionStatus.processing
+        meeting.diarization_status = TranscriptionStatus.processing
         meeting.transcript_error = None
+        meeting.diarization_error = None
         db.commit()
 
         video_path = settings.video_storage_dir / meeting.filename
-        result = transcriber.transcribe(video_path)
+        audio_path = _extract_audio_to_wav(video_path)
+
+        # --- transcription ---
+        transcriber = get_transcriber()
+        transcript_result = transcriber.transcribe(audio_path)
 
         meeting.transcription_status = TranscriptionStatus.completed
-        meeting.transcript_text = result.text
-        meeting.transcript_language = result.language
+        meeting.transcript_text = transcript_result.text
+        meeting.transcript_language = transcript_result.language
         db.commit()
+
+        # --- diarization ---
+        diarizer = get_diarizer()
+        speaker_turns = diarizer.diarize(audio_path)
+
+        meeting.diarization_status = TranscriptionStatus.completed
+        db.commit()
+
+        # --- merge & persist segments ---
+        merged = assign_speakers(transcript_result.segments, speaker_turns)
+
+        db.query(SegmentModel).filter(SegmentModel.meeting_id == meeting_id).delete()
+        for row in merged:
+            db.add(SegmentModel(meeting_id=meeting_id, **row))
+        db.commit()
+
     except Exception as e:
+        db.rollback()
         meeting2 = db.query(Meeting).filter(Meeting.meeting_id == meeting_id).first()
         if meeting2:
-            meeting2.transcription_status = TranscriptionStatus.failed
-            meeting2.transcript_error = str(e)
+            error_str = str(e)
+            if meeting2.transcription_status == TranscriptionStatus.processing:
+                meeting2.transcription_status = TranscriptionStatus.failed
+                meeting2.transcript_error = error_str
+            if meeting2.diarization_status == TranscriptionStatus.processing:
+                meeting2.diarization_status = TranscriptionStatus.failed
+                meeting2.diarization_error = error_str
             db.commit()
     finally:
+        if audio_path:
+            audio_path.unlink(missing_ok=True)
         db.close()
