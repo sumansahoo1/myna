@@ -1,0 +1,22 @@
+services:
+  api:
+    build: .
+    container_name: myna-api
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persist uploaded videos, database, and temp files
+      - myna-storage:/app/storage
+      # Cache ML models so they don't re-download on every restart
+      - myna-models:/root/.cache
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+      - WHISPER_MODEL=${WHISPER_MODEL:-small}
+      - WHISPER_DEVICE=${WHISPER_DEVICE:-auto}
+      - TRANSCRIBER_PROVIDER=${TRANSCRIBER_PROVIDER:-local}
+      - DIARIZER_PROVIDER=${DIARIZER_PROVIDER:-local}
+    restart: unless-stopped
+
+volumes:
+  myna-storage:
+  myna-models:
