@@ -21,4 +21,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
 app.include_router(videos.router, prefix="/api/v1", tags=["videos"])
