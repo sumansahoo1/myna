@@ -57,7 +57,19 @@ class TestUpload:
 
     def test_multiple_extensions(self, client, tmp_video_dir):
         """Each valid extension is accepted."""
-        valid = ["mp4", "avi", "mov", "webm", "mkv", "wmv", "flv", "m4v", "mpeg", "mpg", "3gp"]
+        valid = [
+            "mp4",
+            "avi",
+            "mov",
+            "webm",
+            "mkv",
+            "wmv",
+            "flv",
+            "m4v",
+            "mpeg",
+            "mpg",
+            "3gp",
+        ]
         for ext in valid:
             resp = client.post(
                 "/api/v1/upload",
@@ -98,8 +110,12 @@ class TestGetMeeting:
     def test_response_keys(self, client, sample_meeting):
         resp = client.get(f"/api/v1/meetings/{sample_meeting.meeting_id}")
         expected_keys = {
-            "meeting_id", "video_id", "filename", "transcription_status",
-            "diarization_status", "created_at",
+            "meeting_id",
+            "video_id",
+            "filename",
+            "transcription_status",
+            "diarization_status",
+            "created_at",
         }
         assert set(resp.json().keys()) == expected_keys
 
@@ -146,7 +162,13 @@ class TestGetSegments:
     def test_segment_keys(self, client, completed_meeting):
         resp = client.get(f"/api/v1/meetings/{completed_meeting.meeting_id}/segments")
         seg = resp.json()["segments"][0]
-        assert set(seg.keys()) == {"id", "start_sec", "end_sec", "speaker_label", "text"}
+        assert set(seg.keys()) == {
+            "id",
+            "start_sec",
+            "end_sec",
+            "speaker_label",
+            "text",
+        }
 
     def test_speaker_labels(self, client, completed_meeting):
         resp = client.get(f"/api/v1/meetings/{completed_meeting.meeting_id}/segments")
@@ -196,9 +218,12 @@ class TestProcessMeetingVideo:
 
         from app.models import TranscriptSegment
 
-        segs = db.query(TranscriptSegment).filter(
-            TranscriptSegment.meeting_id == meeting.meeting_id
-        ).order_by(TranscriptSegment.start_sec).all()
+        segs = (
+            db.query(TranscriptSegment)
+            .filter(TranscriptSegment.meeting_id == meeting.meeting_id)
+            .order_by(TranscriptSegment.start_sec)
+            .all()
+        )
         assert len(segs) == 2
         assert segs[0].speaker_label == "SPEAKER_00"
         assert segs[1].speaker_label == "SPEAKER_01"
@@ -217,7 +242,15 @@ class TestProcessMeetingVideo:
         db.add(meeting)
         db.commit()
 
-        failing_transcriber = type("Fake", (), {"transcribe": lambda self, p: (_ for _ in ()).throw(RuntimeError("model crashed"))})()
+        failing_transcriber = type(
+            "Fake",
+            (),
+            {
+                "transcribe": lambda self, p: (_ for _ in ()).throw(
+                    RuntimeError("model crashed")
+                )
+            },
+        )()
 
         fake_wav = tmp_video_dir / "audio.wav"
         fake_wav.write_text("")
@@ -225,7 +258,9 @@ class TestProcessMeetingVideo:
         with (
             patch("app.routers.videos.get_db", override_get_db),
             patch("app.routers.videos._extract_audio_to_wav", return_value=fake_wav),
-            patch("app.routers.videos.get_transcriber", return_value=failing_transcriber),
+            patch(
+                "app.routers.videos.get_transcriber", return_value=failing_transcriber
+            ),
         ):
             _process_meeting_video(meeting.meeting_id)
 
@@ -250,7 +285,15 @@ class TestProcessMeetingVideo:
         db.add(meeting)
         db.commit()
 
-        failing_diarizer = type("Fake", (), {"diarize": lambda self, p: (_ for _ in ()).throw(RuntimeError("no HF token"))})()
+        failing_diarizer = type(
+            "Fake",
+            (),
+            {
+                "diarize": lambda self, p: (_ for _ in ()).throw(
+                    RuntimeError("no HF token")
+                )
+            },
+        )()
 
         fake_wav = tmp_video_dir / "audio.wav"
         fake_wav.write_text("")
@@ -262,3 +305,162 @@ class TestProcessMeetingVideo:
             patch("app.routers.videos.get_diarizer", return_value=failing_diarizer),
         ):
             _process_meeting_video(meeting.meeting_id)
+
+
+# ── POST /api/v1/upload-and-diarize ──────────────────────────────────────
+
+
+class TestUploadAndDiarize:
+    """Synchronous endpoint: upload video → process → return diarization."""
+
+    def test_success(self, client, tmp_video_dir):
+        """Pipeline completes, segments with speaker labels returned."""
+        from app.models import Meeting
+
+        def fake_pipeline(meeting_id):
+            s = next(override_get_db())
+            try:
+                m = s.query(Meeting).filter(Meeting.meeting_id == meeting_id).first()
+                m.transcription_status = TranscriptionStatus.completed
+                m.diarization_status = TranscriptionStatus.completed
+                m.transcript_text = "Hello world. Hi there."
+                m.transcript_language = "en"
+                from app.models import TranscriptSegment as TSeg
+
+                s.add(
+                    TSeg(
+                        meeting_id=meeting_id,
+                        start_sec=0.0,
+                        end_sec=1.5,
+                        speaker_label="SPEAKER_00",
+                        text="Hello world.",
+                    )
+                )
+                s.add(
+                    TSeg(
+                        meeting_id=meeting_id,
+                        start_sec=1.5,
+                        end_sec=3.0,
+                        speaker_label="SPEAKER_01",
+                        text="Hi there.",
+                    )
+                )
+                s.commit()
+            finally:
+                s.close()
+
+        with patch(
+            "app.routers.videos._process_meeting_video", side_effect=fake_pipeline
+        ):
+            resp = client.post(
+                "/api/v1/upload-and-diarize",
+                files={"video": ("test.mp4", b"fake video content", "video/mp4")},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["meeting_id"]
+        assert data["transcription_status"] == TranscriptionStatus.completed
+        assert data["diarization_status"] == TranscriptionStatus.completed
+        assert data["language"] == "en"
+        assert data["transcript_text"] == "Hello world. Hi there."
+        assert data["error"] is None
+        assert len(data["segments"]) == 2
+        assert data["segments"][0]["speaker_label"] == "SPEAKER_00"
+        assert data["segments"][0]["text"] == "Hello world."
+        assert data["segments"][1]["speaker_label"] == "SPEAKER_01"
+        assert data["segments"][1]["text"] == "Hi there."
+
+    def test_success_persists_file(self, client, tmp_video_dir):
+        """Uploaded file is written to disk."""
+
+        def fake_pipeline(meeting_id):
+            pass
+
+        with patch(
+            "app.routers.videos._process_meeting_video", side_effect=fake_pipeline
+        ):
+            client.post(
+                "/api/v1/upload-and-diarize",
+                files={"video": ("meeting.mp4", b"file bytes", "video/mp4")},
+            )
+
+        stored = list(tmp_video_dir.iterdir())
+        assert len(stored) == 1
+        assert stored[0].suffix == ".mp4"
+        assert stored[0].read_bytes() == b"file bytes"
+
+    def test_invalid_format(self, client, tmp_video_dir):
+        resp = client.post(
+            "/api/v1/upload-and-diarize",
+            files={"video": ("malware.exe", b"content", "application/octet-stream")},
+        )
+        assert resp.status_code == 400
+        assert "invalid video format" in resp.json()["detail"].lower()
+
+    def test_without_filename(self, client, tmp_video_dir):
+        resp = client.post(
+            "/api/v1/upload-and-diarize",
+            files={"video": b"content"},
+        )
+        assert resp.status_code == 400
+
+    def test_pipeline_failure_returns_error(self, client, tmp_video_dir):
+        """Failed pipeline → response has error + failed status."""
+        from app.models import Meeting
+
+        def failing_pipeline(meeting_id):
+            s = next(override_get_db())
+            try:
+                m = s.query(Meeting).filter(Meeting.meeting_id == meeting_id).first()
+                m.transcription_status = TranscriptionStatus.failed
+                m.diarization_status = TranscriptionStatus.failed
+                m.transcript_error = "model crashed"
+                m.diarization_error = "model crashed"
+                s.commit()
+            finally:
+                s.close()
+
+        with patch(
+            "app.routers.videos._process_meeting_video", side_effect=failing_pipeline
+        ):
+            resp = client.post(
+                "/api/v1/upload-and-diarize",
+                files={"video": ("test.mp4", b"fake video content", "video/mp4")},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["transcription_status"] == TranscriptionStatus.failed
+        assert data["diarization_status"] == TranscriptionStatus.failed
+        assert data["error"] == "model crashed"
+        assert len(data["segments"]) == 0
+
+    def test_multiple_valid_extensions(self, client, tmp_video_dir):
+        """All allowed video extensions are accepted."""
+        valid = [
+            "mp4",
+            "avi",
+            "mov",
+            "webm",
+            "mkv",
+            "wmv",
+            "flv",
+            "m4v",
+            "mpeg",
+            "mpg",
+            "3gp",
+        ]
+
+        def fake_pipeline(meeting_id):
+            pass
+
+        with patch(
+            "app.routers.videos._process_meeting_video", side_effect=fake_pipeline
+        ):
+            for ext in valid:
+                resp = client.post(
+                    "/api/v1/upload-and-diarize",
+                    files={"video": (f"video.{ext}", b"content", "video/mp4")},
+                )
+                assert resp.status_code == 200, f"Extension .{ext} should be accepted"

@@ -5,17 +5,37 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # Persist uploaded videos, database, and temp files
+      # Persist uploaded videos, database, and tmp files
       - myna-storage:/app/storage
-      # Cache ML models so they don't re-download on every restart
+      # Cache ML models (faster-whisper, pyannote) so they survive restarts
       - myna-models:/root/.cache
+      # tmpfs for temporary wav files (extracted audio) — faster, ephemeral
+      - type: tmpfs
+        target: /app/storage/tmp
+        tmpfs:
+          size: 2G
     environment:
       - HF_TOKEN=${HF_TOKEN:-}
       - WHISPER_MODEL=${WHISPER_MODEL:-small}
-      - WHISPER_DEVICE=${WHISPER_DEVICE:-auto}
+      - WHISPER_DEVICE=${WHISPER_DEVICE:-cpu}
       - TRANSCRIBER_PROVIDER=${TRANSCRIBER_PROVIDER:-local}
       - DIARIZER_PROVIDER=${DIARIZER_PROVIDER:-local}
+      # Optional overrides for storage paths (defaults use /app/storage/)
+      - STORAGE_DIR=${STORAGE_DIR:-}
+      - DATABASE_URL=${DATABASE_URL:-}
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    # Resource limits (uncomment for production)
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 8G
+    #       cpus: "4"
 
 volumes:
   myna-storage:

@@ -58,3 +58,13 @@ class SegmentsListResponse(BaseModel):
     transcription_status: str
     diarization_status: str
     segments: list[SegmentResponse]
+
+
+class DiarizeUploadResponse(BaseModel):
+    meeting_id: str
+    transcription_status: str
+    diarization_status: str
+    language: str | None = None
+    transcript_text: str | None = None
+    segments: list[SegmentResponse]
+    error: str | None = None

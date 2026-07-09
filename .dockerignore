@@ -1,9 +1,36 @@
+# Python
 __pycache__
 *.pyc
-.env
-.git
+*.pyo
+*.egg-info
+.eggs
+dist/
+build/
+
+# Virtual env
 .venv
-storage/
+venv
+env/
+
+# Git
+.git
+.gitignore
+
+# Environment
+.env
+
+# Tests
 tests/
+.pytest_cache/
+
+# Storage (mounted at runtime)
+storage/
+
+# Docs
 README.md
 PROJECT_STRUCTURE.md
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore

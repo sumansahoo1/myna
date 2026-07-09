@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from app.diarization import get_diarizer
 from app.merge import assign_speakers
 from app.models import Meeting, TranscriptSegment as SegmentModel
 from app.schemas import (
+    DiarizeUploadResponse,
     MeetingResponse,
     SegmentResponse,
     SegmentsListResponse,
@@ -23,8 +25,17 @@ from app.transcription import get_transcriber, _extract_audio_to_wav
 router = APIRouter()
 
 ALLOWED_EXTENSIONS = {
-    ".mp4", ".avi", ".mov", ".webm", ".mkv", ".wmv", ".flv",
-    ".m4v", ".mpeg", ".mpg", ".3gp",
+    ".mp4",
+    ".avi",
+    ".mov",
+    ".webm",
+    ".mkv",
+    ".wmv",
+    ".flv",
+    ".m4v",
+    ".mpeg",
+    ".mpg",
+    ".3gp",
 }
 
 
@@ -129,6 +140,77 @@ def get_segments(meeting_id: str, db: Session = Depends(get_db)):
             )
             for seg in segments
         ],
+    )
+
+
+@router.post("/upload-and-diarize", response_model=DiarizeUploadResponse)
+async def upload_and_diarize(
+    video: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    if not video.filename:
+        raise HTTPException(status_code=400, detail="No filename provided")
+
+    if not is_valid_video_format(video.filename):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid video format. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
+        )
+
+    meeting_id = str(uuid.uuid4())
+    video_id = str(uuid.uuid4())
+    ext = get_file_extension(video.filename)
+    stored_filename = f"{video_id}{ext}"
+
+    video_path = settings.video_storage_dir / stored_filename
+    video_path.parent.mkdir(parents=True, exist_ok=True)
+
+    async with aiofiles.open(video_path, "wb") as buffer:
+        while content := await video.read(1024 * 1024):
+            await buffer.write(content)
+
+    meeting = Meeting(
+        meeting_id=meeting_id,
+        video_id=video_id,
+        filename=stored_filename,
+        transcription_status=TranscriptionStatus.pending,
+        diarization_status=TranscriptionStatus.pending,
+    )
+    db.add(meeting)
+    db.commit()
+    db.refresh(meeting)
+
+    # Run pipeline synchronously in thread pool to avoid blocking event loop.
+    await asyncio.to_thread(_process_meeting_video, meeting_id)
+
+    # Refresh and read results.
+    db.refresh(meeting)
+    segments = (
+        db.query(SegmentModel)
+        .filter(SegmentModel.meeting_id == meeting_id)
+        .order_by(SegmentModel.start_sec)
+        .all()
+    )
+
+    error = meeting.transcript_error or meeting.diarization_error
+
+    return DiarizeUploadResponse(
+        meeting_id=meeting_id,
+        transcription_status=meeting.transcription_status,
+        diarization_status=meeting.diarization_status,
+        language=meeting.transcript_language,
+        transcript_text=meeting.transcript_text,
+        segments=[
+            SegmentResponse(
+                id=seg.id,
+                start_sec=seg.start_sec,
+                end_sec=seg.end_sec,
+                speaker_label=seg.speaker_label,
+                text=seg.text,
+            )
+            for seg in segments
+        ],
+        error=error,
     )
 
 
