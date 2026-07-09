@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import uuid
@@ -7,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -29,11 +32,18 @@ class Transcriber:
 
 
 def get_transcriber() -> Transcriber:
-    provider = os.getenv("TRANSCRIBER_PROVIDER", settings.transcriber_provider).strip().lower()
+    provider = (
+        os.getenv("TRANSCRIBER_PROVIDER", settings.transcriber_provider).strip().lower()
+    )
     if provider == "local":
+        model = os.getenv("WHISPER_MODEL", settings.whisper_model)
+        device = os.getenv("WHISPER_DEVICE", settings.whisper_device)
+        logger.info(
+            "transcriber: local faster-whisper model=%s device=%s", model, device
+        )
         return LocalFasterWhisperTranscriber(
-            model_name=os.getenv("WHISPER_MODEL", settings.whisper_model),
-            device=os.getenv("WHISPER_DEVICE", settings.whisper_device),
+            model_name=model,
+            device=device,
         )
     if provider == "hosted":
         return HostedTranscriberStub()
@@ -56,9 +66,15 @@ class LocalFasterWhisperTranscriber(Transcriber):
 
     def _get_model(self):
         if self._model is None:
+            logger.info(
+                "loading faster-whisper model=%s device=%s",
+                self._model_name,
+                self._device,
+            )
             from faster_whisper import WhisperModel
 
             self._model = WhisperModel(self._model_name, device=self._device)
+            logger.info("faster-whisper model loaded")
         return self._model
 
     def transcribe(self, audio_path: Path) -> TranscriptResult:
@@ -71,11 +87,13 @@ class LocalFasterWhisperTranscriber(Transcriber):
             txt = seg.text.strip()
             if not txt:
                 continue
-            segments.append(TranscriptSegment(
-                start_sec=round(seg.start, 3),
-                end_sec=round(seg.end, 3),
-                text=txt,
-            ))
+            segments.append(
+                TranscriptSegment(
+                    start_sec=round(seg.start, 3),
+                    end_sec=round(seg.end, 3),
+                    text=txt,
+                )
+            )
             parts.append(txt)
 
         return TranscriptResult(
@@ -108,8 +126,12 @@ def _extract_audio_to_wav(video_path: Path) -> Path:
         "wav",
         str(out_path),
     ]
+    logger.info("ffmpeg extracting audio: %s", video_path.name)
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg failed: {proc.stderr.strip() or proc.stdout.strip()}")
+        logger.error("ffmpeg failed for %s: %s", video_path.name, proc.stderr.strip())
+        raise RuntimeError(
+            f"ffmpeg failed: {proc.stderr.strip() or proc.stdout.strip()}"
+        )
+    logger.info("ffmpeg done → %s", out_path)
     return out_path
-

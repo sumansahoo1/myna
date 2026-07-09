@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import uuid
 from pathlib import Path
 
@@ -21,6 +22,8 @@ from app.schemas import (
     VideoUploadResponse,
 )
 from app.transcription import get_transcriber, _extract_audio_to_wav
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -180,8 +183,18 @@ async def upload_and_diarize(
     db.commit()
     db.refresh(meeting)
 
+    logger.info(
+        "upload-and-diarize: meeting_id=%s file=%s starting pipeline",
+        meeting_id,
+        stored_filename,
+    )
+
     # Run pipeline synchronously in thread pool to avoid blocking event loop.
     await asyncio.to_thread(_process_meeting_video, meeting_id)
+
+    logger.info(
+        "upload-and-diarize: meeting_id=%s pipeline done, reading results", meeting_id
+    )
 
     # Refresh and read results.
     db.refresh(meeting)
@@ -229,6 +242,9 @@ def _process_meeting_video(meeting_id: str) -> None:
     try:
         meeting = db.query(Meeting).filter(Meeting.meeting_id == meeting_id).first()
         if not meeting:
+            logger.warning(
+                "_process_meeting_video: meeting_id=%s not found", meeting_id
+            )
             return
 
         meeting.transcription_status = TranscriptionStatus.processing
@@ -238,9 +254,22 @@ def _process_meeting_video(meeting_id: str) -> None:
         db.commit()
 
         video_path = settings.video_storage_dir / meeting.filename
+        logger.info(
+            "_process_meeting_video: meeting_id=%s extracting audio from %s",
+            meeting_id,
+            video_path.name,
+        )
         audio_path = _extract_audio_to_wav(video_path)
+        logger.info(
+            "_process_meeting_video: meeting_id=%s audio extracted → %s",
+            meeting_id,
+            audio_path,
+        )
 
         # --- transcription ---
+        logger.info(
+            "_process_meeting_video: meeting_id=%s starting transcription", meeting_id
+        )
         transcriber = get_transcriber()
         transcript_result = transcriber.transcribe(audio_path)
 
@@ -248,23 +277,47 @@ def _process_meeting_video(meeting_id: str) -> None:
         meeting.transcript_text = transcript_result.text
         meeting.transcript_language = transcript_result.language
         db.commit()
+        logger.info(
+            "_process_meeting_video: meeting_id=%s transcription done language=%s segments=%d",
+            meeting_id,
+            transcript_result.language,
+            len(transcript_result.segments),
+        )
 
         # --- diarization ---
+        logger.info(
+            "_process_meeting_video: meeting_id=%s starting diarization", meeting_id
+        )
         diarizer = get_diarizer()
         speaker_turns = diarizer.diarize(audio_path)
 
         meeting.diarization_status = TranscriptionStatus.completed
         db.commit()
+        logger.info(
+            "_process_meeting_video: meeting_id=%s diarization done speakers=%d",
+            meeting_id,
+            len(set(t.speaker_label for t in speaker_turns)),
+        )
 
         # --- merge & persist segments ---
+        logger.info(
+            "_process_meeting_video: meeting_id=%s merging segments with speakers",
+            meeting_id,
+        )
         merged = assign_speakers(transcript_result.segments, speaker_turns)
 
         db.query(SegmentModel).filter(SegmentModel.meeting_id == meeting_id).delete()
         for row in merged:
             db.add(SegmentModel(meeting_id=meeting_id, **row))
         db.commit()
+        logger.info(
+            "_process_meeting_video: meeting_id=%s persisted %d segments",
+            meeting_id,
+            len(merged),
+        )
 
     except Exception as e:
+        logger.error("_process_meeting_video: meeting_id=%s FAILED: %s", meeting_id, e)
         db.rollback()
         meeting2 = db.query(Meeting).filter(Meeting.meeting_id == meeting_id).first()
         if meeting2:

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -20,14 +23,21 @@ class Diarizer:
 
 
 def get_diarizer() -> Diarizer:
-    provider = os.getenv("DIARIZER_PROVIDER", settings.diarizer_provider).strip().lower()
+    provider = (
+        os.getenv("DIARIZER_PROVIDER", settings.diarizer_provider).strip().lower()
+    )
     hf_token = os.getenv("HF_TOKEN", settings.hf_token or "").strip()
 
     if provider == "local":
         if not hf_token:
+            logger.info(
+                "diarizer: no HF_TOKEN, using NoopDiarizer (all speakers=UNKNOWN)"
+            )
             return NoopDiarizer()
+        logger.info("diarizer: local pyannote with HF_TOKEN")
         return LocalPyannoteDializer(hf_token=hf_token, num_speakers=None)
     if provider == "hosted":
+        logger.info("diarizer: hosted stub selected")
         return HostedDiarizerStub()
     raise ValueError(f"Unknown diarizer provider: {provider}")
 
@@ -73,15 +83,20 @@ class LocalPyannoteDializer(Diarizer):
 
     def _get_pipeline(self):
         if self._pipeline is None:
+            logger.info(
+                "loading pyannote diarization pipeline: pyannote/speaker-diarization-3.1"
+            )
             from pyannote.audio import Pipeline
 
             self._pipeline = Pipeline.from_pretrained(
                 "pyannote/speaker-diarization-3.1",
                 use_auth_token=self._hf_token,
             )
+            logger.info("pyannote pipeline loaded")
         return self._pipeline
 
     def diarize(self, audio_path: Path) -> list[SpeakerTurn]:
+        logger.info("diarizing: %s", audio_path.name)
         pipeline = self._get_pipeline()
         kwargs = {}
         if self._num_speakers:
@@ -98,4 +113,5 @@ class LocalPyannoteDializer(Diarizer):
                     speaker_label=speaker,
                 )
             )
+        logger.info("diarization done: %d speaker turns found", len(turns))
         return turns
