@@ -1,12 +1,14 @@
 import asyncio
 import logging
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import aiofiles
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
+from app.chunking import AudioChunk, split_audio, stitch_transcripts
 from app.config import settings
 from app.database import get_db
 from app.diarization import get_diarizer
@@ -21,7 +23,8 @@ from app.schemas import (
     TranscriptionStatus,
     VideoUploadResponse,
 )
-from app.transcription import get_transcriber, _extract_audio_to_wav
+from app.transcription import TranscriptResult, get_transcriber, _extract_audio_to_wav
+from app.vad import detect_speech_regions
 
 logger = logging.getLogger(__name__)
 
@@ -231,13 +234,15 @@ def _process_meeting_video(meeting_id: str) -> None:
     """
     Background pipeline:
       1. Extract audio once
-      2. Transcribe (faster-whisper) → timestamped segments
-      3. Diarize (pyannote) → speaker turns
-      4. Merge → assign speakers to segments
-      5. Persist results
+      2. VAD → detect speech regions (skip silence)
+      3. Split audio into overlapping chunks (if enabled)
+      4. Transcribe (chunked or full) | Diarize  —  in parallel
+      5. Merge → assign speakers to segments
+      6. Persist results
     """
     db = next(get_db())
     audio_path = None
+    chunk_paths: set[Path] = set()
 
     try:
         meeting = db.query(Meeting).filter(Meeting.meeting_id == meeting_id).first()
@@ -266,38 +271,101 @@ def _process_meeting_video(meeting_id: str) -> None:
             audio_path,
         )
 
-        # --- transcription ---
-        logger.info(
-            "_process_meeting_video: meeting_id=%s starting transcription", meeting_id
-        )
+        # --- VAD: detect speech regions ---
+        speech_regions = None
+        if settings.enable_vad:
+            try:
+                speech_regions = detect_speech_regions(audio_path)
+                if not speech_regions:
+                    logger.info(
+                        "_process_meeting_video: meeting_id=%s VAD found no speech, "
+                        "returning empty transcript",
+                        meeting_id,
+                    )
+                    meeting.transcription_status = TranscriptionStatus.completed
+                    meeting.transcript_text = ""
+                    meeting.transcript_language = None
+                    meeting.diarization_status = TranscriptionStatus.completed
+                    db.commit()
+                    db.query(SegmentModel).filter(
+                        SegmentModel.meeting_id == meeting_id
+                    ).delete()
+                    db.commit()
+                    return
+            except Exception as e:
+                logger.warning(
+                    "_process_meeting_video: meeting_id=%s VAD failed (%s), "
+                    "proceeding without VAD",
+                    meeting_id,
+                    e,
+                )
+                speech_regions = None
+
+        # --- chunking ---
+        chunks: list[AudioChunk] = []
+        use_chunks = False
+        if settings.enable_chunking:
+            try:
+                chunks = split_audio(audio_path, speech_regions=speech_regions)
+                chunk_paths.update(
+                    c.wav_path for c in chunks if c.wav_path != audio_path
+                )
+                use_chunks = len(chunks) > 1
+            except Exception as e:
+                logger.warning(
+                    "_process_meeting_video: meeting_id=%s chunking failed (%s), "
+                    "falling back to single-file transcription",
+                    meeting_id,
+                    e,
+                )
+
+        # --- parallel: transcribe + diarize ---
         transcriber = get_transcriber()
-        transcript_result = transcriber.transcribe(audio_path)
-
-        meeting.transcription_status = TranscriptionStatus.completed
-        meeting.transcript_text = transcript_result.text
-        meeting.transcript_language = transcript_result.language
-        db.commit()
-        logger.info(
-            "_process_meeting_video: meeting_id=%s transcription done language=%s segments=%d",
-            meeting_id,
-            transcript_result.language,
-            len(transcript_result.segments),
-        )
-
-        # --- diarization ---
-        logger.info(
-            "_process_meeting_video: meeting_id=%s starting diarization", meeting_id
-        )
         diarizer = get_diarizer()
-        speaker_turns = diarizer.diarize(audio_path)
 
-        meeting.diarization_status = TranscriptionStatus.completed
-        db.commit()
-        logger.info(
-            "_process_meeting_video: meeting_id=%s diarization done speakers=%d",
-            meeting_id,
-            len(set(t.speaker_label for t in speaker_turns)),
-        )
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            if use_chunks:
+                logger.info(
+                    "_process_meeting_video: meeting_id=%s chunked transcribe %d chunks",
+                    meeting_id,
+                    len(chunks),
+                )
+                fut_transcribe = executor.submit(
+                    _transcribe_chunks, transcriber, chunks
+                )
+            else:
+                fut_transcribe = executor.submit(transcriber.transcribe, audio_path)
+
+            fut_diarize = executor.submit(diarizer.diarize, audio_path)
+
+            # --- transcription result ---
+            raw = fut_transcribe.result()
+            if use_chunks:
+                transcript_result: TranscriptResult = stitch_transcripts(chunks, raw)
+            else:
+                transcript_result: TranscriptResult = raw
+
+            meeting.transcription_status = TranscriptionStatus.completed
+            meeting.transcript_text = transcript_result.text
+            meeting.transcript_language = transcript_result.language
+            db.commit()
+            logger.info(
+                "_process_meeting_video: meeting_id=%s transcription done language=%s segments=%d",
+                meeting_id,
+                transcript_result.language,
+                len(transcript_result.segments),
+            )
+
+            # --- diarization result ---
+            speaker_turns: list = fut_diarize.result()
+
+            meeting.diarization_status = TranscriptionStatus.completed
+            db.commit()
+            logger.info(
+                "_process_meeting_video: meeting_id=%s diarization done speakers=%d",
+                meeting_id,
+                len(set(t.speaker_label for t in speaker_turns)),
+            )
 
         # --- merge & persist segments ---
         logger.info(
@@ -332,4 +400,12 @@ def _process_meeting_video(meeting_id: str) -> None:
     finally:
         if audio_path:
             audio_path.unlink(missing_ok=True)
+        for cp in chunk_paths:
+            if cp != audio_path:
+                cp.unlink(missing_ok=True)
         db.close()
+
+
+def _transcribe_chunks(transcriber, chunks: list[AudioChunk]) -> list:
+    """Transcribe chunks and return list of TranscriptResult (one per chunk)."""
+    return transcriber.transcribe_chunks(chunks)
