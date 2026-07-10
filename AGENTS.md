@@ -77,4 +77,6 @@ CI runs `pytest tests/ -v --tb=short` on every push/PR. Must install `ffmpeg` be
 - Deleting branches, files, or releases on GitHub
 - Any GitHub MCP write tool (`github_issue_write`, `github_create_pull_request`, `github_push_files`, `github_add_issue_comment`, etc.)
 
-Local git operations (commit, branch, diff, log) are fine. Ask before anything that touches the remote.
+**NEVER commit changes unless the user explicitly asks you to.** This includes `git add`, `git commit`, `git stash`, or any other mutating git operation — even local ones. Wait for an explicit instruction like "commit this" before touching git at all.
+
+Ask before anything that touches the remote.
