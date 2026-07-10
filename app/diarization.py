@@ -88,10 +88,17 @@ class LocalPyannoteDializer(Diarizer):
             )
             from pyannote.audio import Pipeline
 
-            self._pipeline = Pipeline.from_pretrained(
+            pipeline = Pipeline.from_pretrained(
                 "pyannote/speaker-diarization-3.1",
                 use_auth_token=self._hf_token,
             )
+            if pipeline is None:
+                raise RuntimeError(
+                    "Failed to load pyannote/speaker-diarization-3.1. "
+                    "Verify HF_TOKEN is set and you accepted the user conditions at "
+                    "https://hf.co/pyannote/speaker-diarization-3.1"
+                )
+            self._pipeline = pipeline
             logger.info("pyannote pipeline loaded")
         return self._pipeline
 
