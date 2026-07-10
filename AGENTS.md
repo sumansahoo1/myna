@@ -2,7 +2,11 @@
 
 ## Commands
 
+Always activate the venv and export env vars before running Python commands:
+
 ```bash
+source .venv/bin/activate && set -a && source .env && set +a
+
 # Dev server (requires python 3.10+, ffmpeg on PATH)
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
