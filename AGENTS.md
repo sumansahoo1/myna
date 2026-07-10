@@ -2,13 +2,14 @@
 
 ## Commands
 
-Always activate the venv and export env vars before running Python commands:
+Activate the venv before running Python commands (`.env` is auto-loaded by `python-dotenv` in `app/config.py`):
 
 ```bash
-source .venv/bin/activate && set -a && source .env && set +a
+source .venv/bin/activate
 
 # Dev server (requires python 3.10+, ffmpeg on PATH)
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+# Use `python -m uvicorn` not bare `uvicorn` — venv binary has wrong shebang
+python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 # Docker (CPU target by default; BUILD_TARGET=gpu for CUDA)
 docker compose up           # CPU
@@ -25,9 +26,10 @@ pytest tests/test_videos_router.py -v
 
 Single FastAPI app (`app.main:app`). `app/routers/videos.py` holds all endpoints under `/api/v1`. No auth layer (assumes trusted reverse proxy/VPN).
 
-Processing pipeline: **VAD → chunking → parallel(transcribe + diarize) → merge → persist**.
-- `ENABLE_VAD` and `ENABLE_CHUNKING` env vars toggle each stage (both default `true`).
-- Transcription + diarization run in `ThreadPoolExecutor(max_workers=2)` — wall-clock = max of the two.
+Processing pipeline: **VAD → batched transcribe + diarize (parallel) → merge → persist**.
+- `ENABLE_VAD` env var toggles VAD pre-filtering (default `true`).
+- `ENABLE_CHUNKING` toggles BatchedInferencePipeline (GPU-batched) vs single-file transcription (default `true`).
+- Transcription (BatchedInferencePipeline or single-file) + diarization run in `ThreadPoolExecutor(max_workers=2)` — wall-clock = max of the two.
 - Pipeline runs via FastAPI `BackgroundTasks` (same process, no external queue).
 
 Provider pattern: `get_transcriber()` / `get_diarizer()` select `local` or `hosted` based on env vars. `hosted` provider stubs raise `RuntimeError` — not implemented.
