@@ -38,6 +38,15 @@ class Transcriber:
             results.append(_offset_segments(result, chunk.start_sec))
         return results
 
+    def transcribe_batched(
+        self,
+        audio_path: Path,
+        speech_regions: list | None = None,
+        language: str | None = None,
+    ) -> TranscriptResult:
+        """Transcribe full audio with batched GPU inference. Override for optimization."""
+        return self.transcribe(audio_path)
+
 
 def get_transcriber() -> Transcriber:
     provider = settings.transcriber_provider.strip().lower()
@@ -64,6 +73,17 @@ class HostedTranscriberStub(Transcriber):
         )
 
     def transcribe_chunks(self, chunks: list) -> list[TranscriptResult]:
+        raise RuntimeError(
+            "Hosted transcription provider is not configured yet. "
+            "Set TRANSCRIBER_PROVIDER=local to use local transcription."
+        )
+
+    def transcribe_batched(
+        self,
+        audio_path: Path,
+        speech_regions: list | None = None,
+        language: str | None = None,
+    ) -> TranscriptResult:
         raise RuntimeError(
             "Hosted transcription provider is not configured yet. "
             "Set TRANSCRIBER_PROVIDER=local to use local transcription."
@@ -155,6 +175,66 @@ class LocalFasterWhisperTranscriber(Transcriber):
                 results[idx] = future.result()
 
         return [r for r in results if r is not None]
+
+    def transcribe_batched(
+        self,
+        audio_path: Path,
+        speech_regions: list | None = None,
+        language: str | None = None,
+    ) -> TranscriptResult:
+        """Transcribe full audio using BatchedInferencePipeline for true GPU batching."""
+        from faster_whisper import BatchedInferencePipeline
+
+        model = self._get_model()
+        pipeline = BatchedInferencePipeline(model)
+
+        kwargs: dict = {"batch_size": max(1, min(settings.chunk_batch_size, 8))}
+
+        if speech_regions:
+            sampling_rate = 16000
+            clip_timestamps = [
+                {
+                    "start": int(r.start_sec * sampling_rate),
+                    "end": int(r.end_sec * sampling_rate),
+                }
+                for r in speech_regions
+            ]
+            kwargs["clip_timestamps"] = clip_timestamps
+            kwargs["vad_filter"] = False
+        # else: let BatchedInferencePipeline run its own VAD (vad_filter=True by default)
+
+        if language:
+            kwargs["language"] = language
+
+        logger.info(
+            "batched transcribe: audio=%s speech_regions=%d batch_size=%d",
+            audio_path.name,
+            len(speech_regions) if speech_regions else 0,
+            kwargs["batch_size"],
+        )
+
+        raw_segments, info = pipeline.transcribe(str(audio_path), **kwargs)
+
+        segments: list[TranscriptSegment] = []
+        parts: list[str] = []
+        for seg in raw_segments:
+            txt = seg.text.strip()
+            if not txt:
+                continue
+            segments.append(
+                TranscriptSegment(
+                    start_sec=round(seg.start, 3),
+                    end_sec=round(seg.end, 3),
+                    text=txt,
+                )
+            )
+            parts.append(txt)
+
+        return TranscriptResult(
+            text=" ".join(parts),
+            language=getattr(info, "language", None),
+            segments=segments,
+        )
 
 
 def _offset_segments(result: TranscriptResult, offset: float) -> TranscriptResult:

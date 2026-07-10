@@ -8,7 +8,7 @@ import aiofiles
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
-from app.chunking import AudioChunk, split_audio, stitch_transcripts
+from app.chunking import AudioChunk
 from app.config import settings
 from app.database import get_db
 from app.diarization import get_diarizer
@@ -235,10 +235,9 @@ def _process_meeting_video(meeting_id: str) -> None:
     Background pipeline:
       1. Extract audio once
       2. VAD → detect speech regions (skip silence)
-      3. Split audio into overlapping chunks (if enabled)
-      4. Transcribe (chunked or full) | Diarize  —  in parallel
-      5. Merge → assign speakers to segments
-      6. Persist results
+      3. Transcribe (batched GPU or single-file) | Diarize  —  in parallel
+      4. Merge → assign speakers to segments
+      5. Persist results
     """
     db = next(get_db())
     audio_path = None
@@ -301,51 +300,29 @@ def _process_meeting_video(meeting_id: str) -> None:
                 )
                 speech_regions = None
 
-        # --- chunking ---
-        chunks: list[AudioChunk] = []
-        use_chunks = False
-        if settings.enable_chunking:
-            try:
-                chunks = split_audio(audio_path, speech_regions=speech_regions)
-                chunk_paths.update(
-                    c.wav_path for c in chunks if c.wav_path != audio_path
-                )
-                use_chunks = len(chunks) > 1
-            except Exception as e:
-                logger.warning(
-                    "_process_meeting_video: meeting_id=%s chunking failed (%s), "
-                    "falling back to single-file transcription",
-                    meeting_id,
-                    e,
-                )
+        # --- batched transcription (replaces file-based chunking + threaded transcribe) ---
+        use_batched = settings.enable_chunking
 
         # --- parallel: transcribe + diarize ---
         transcriber = get_transcriber()
         diarizer = get_diarizer()
 
         with ThreadPoolExecutor(max_workers=2) as executor:
-            if use_chunks:
+            if use_batched:
                 logger.info(
-                    "_process_meeting_video: meeting_id=%s chunked transcribe %d chunks",
+                    "_process_meeting_video: meeting_id=%s batched transcribe on full audio",
                     meeting_id,
-                    len(chunks),
                 )
                 fut_transcribe = executor.submit(
-                    _transcribe_chunks, transcriber, chunks
+                    transcriber.transcribe_batched, audio_path, speech_regions
                 )
             else:
                 fut_transcribe = executor.submit(transcriber.transcribe, audio_path)
 
             fut_diarize = executor.submit(diarizer.diarize, audio_path)
 
-            # --- collect both results before committing any state ---
-            raw = fut_transcribe.result()
+            transcript_result: TranscriptResult = fut_transcribe.result()
             speaker_turns: list = fut_diarize.result()
-
-            if use_chunks:
-                transcript_result: TranscriptResult = stitch_transcripts(chunks, raw)
-            else:
-                transcript_result: TranscriptResult = raw
 
             meeting.transcription_status = TranscriptionStatus.completed
             meeting.transcript_text = transcript_result.text
