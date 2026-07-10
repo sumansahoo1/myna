@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -23,10 +22,8 @@ class Diarizer:
 
 
 def get_diarizer() -> Diarizer:
-    provider = (
-        os.getenv("DIARIZER_PROVIDER", settings.diarizer_provider).strip().lower()
-    )
-    hf_token = os.getenv("HF_TOKEN", settings.hf_token or "").strip()
+    provider = settings.diarizer_provider.strip().lower()
+    hf_token = (settings.hf_token or "").strip()
 
     if provider == "local":
         if not hf_token:

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import subprocess
 import uuid
 from dataclasses import dataclass, field
@@ -40,12 +39,10 @@ class Transcriber:
 
 
 def get_transcriber() -> Transcriber:
-    provider = (
-        os.getenv("TRANSCRIBER_PROVIDER", settings.transcriber_provider).strip().lower()
-    )
+    provider = settings.transcriber_provider.strip().lower()
     if provider == "local":
-        model = os.getenv("WHISPER_MODEL", settings.whisper_model)
-        device = os.getenv("WHISPER_DEVICE", settings.whisper_device)
+        model = settings.whisper_model
+        device = settings.whisper_device
         logger.info(
             "transcriber: local faster-whisper model=%s device=%s", model, device
         )

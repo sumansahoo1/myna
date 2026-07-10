@@ -36,21 +36,42 @@ ALLOWED_VIDEO_EXTENSIONS = {
 }
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    val = os.getenv(name)
+    if val is None:
+        return default
+    return val.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_float(name: str, default: float) -> float:
+    val = os.getenv(name)
+    if val is None:
+        return default
+    return float(val)
+
+
+def _env_int(name: str, default: int) -> int:
+    val = os.getenv(name)
+    if val is None:
+        return default
+    return int(val)
+
+
 class Settings:
     database_url: str = os.getenv("DATABASE_URL", DATABASE_URL)
-    video_storage_dir: Path = VIDEOS_DIR
+    video_storage_dir: Path = Path(os.getenv("STORAGE_DIR", VIDEOS_DIR))
     allowed_extensions: set = ALLOWED_VIDEO_EXTENSIONS
-    transcriber_provider: str = "local"  # "local" | "hosted"
-    whisper_model: str = "small"  # tiny|base|small|medium|large-v3|large-v3-turbo
-    whisper_device: str = _detect_device()  # auto-detect GPU
-    diarizer_provider: str = "local"  # "local" | "hosted"
-    hf_token: str | None = None  # HuggingFace token for pyannote models
+    transcriber_provider: str = os.getenv("TRANSCRIBER_PROVIDER", "local")
+    whisper_model: str = os.getenv("WHISPER_MODEL", "small")
+    whisper_device: str = os.getenv("WHISPER_DEVICE") or _detect_device()
+    diarizer_provider: str = os.getenv("DIARIZER_PROVIDER", "local")
+    hf_token: str | None = os.getenv("HF_TOKEN") or None
     # Phase 1: chunking & VAD
-    chunk_duration_sec: float = 30.0  # seconds per audio chunk
-    chunk_overlap_sec: float = 5.0  # overlap between chunks
-    chunk_batch_size: int = 16  # max chunks per transcribe batch
-    enable_vad: bool = True  # skip silence via Silero VAD
-    enable_chunking: bool = True  # split long audio and batch-transcribe
+    chunk_duration_sec: float = _env_float("CHUNK_DURATION_SEC", 30.0)
+    chunk_overlap_sec: float = _env_float("CHUNK_OVERLAP_SEC", 5.0)
+    chunk_batch_size: int = _env_int("CHUNK_BATCH_SIZE", 16)
+    enable_vad: bool = _env_bool("ENABLE_VAD", True)
+    enable_chunking: bool = _env_bool("ENABLE_CHUNKING", True)
 
 
 settings = Settings()

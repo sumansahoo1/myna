@@ -73,6 +73,11 @@ def _split_uniform(
     overlap: float,
     tmp_dir: Path,
 ) -> list[AudioChunk]:
+    if overlap >= chunk_dur:
+        raise ValueError(
+            f"overlap ({overlap}s) must be less than chunk_duration ({chunk_dur}s)"
+        )
+
     chunks: list[AudioChunk] = []
     chunk_id = 0
     cursor = 0.0
@@ -110,6 +115,11 @@ def _split_by_speech(
     tmp_dir: Path,
 ) -> list[AudioChunk]:
     """Split audio into chunks aligned to VAD-detected speech regions."""
+    if overlap >= chunk_dur:
+        raise ValueError(
+            f"overlap ({overlap}s) must be less than chunk_duration ({chunk_dur}s)"
+        )
+
     chunks: list[AudioChunk] = []
     chunk_id = 0
 
@@ -192,19 +202,16 @@ def stitch_transcripts(
     """
     Merge transcript results from overlapping chunks into a single result.
 
-    For overlap regions, segments from the earlier chunk are kept and
-    later-chunk segments that lie entirely in the overlap are dropped.
+    For overlap regions between consecutive chunks, segments from the later
+    chunk that lie entirely within the previous chunk's territory (end_sec
+    <= previous_chunk.end_sec) are dropped — they were already transcribed.
     Timestamps are already absolute (adjusted during chunk transcription).
     """
-    ov = overlap or settings.chunk_overlap_sec
-
     all_segments: list[TranscriptSegment] = []
-    boundary = -1.0  # tracks where the previous chunk ended (minus overlap)
+    boundary = -1.0
 
     for chunk, result in zip(chunks, chunk_results):
         for seg in result.segments:
-            # Drop segments that fall entirely before previous chunk's end
-            # (they were already covered by the earlier chunk)
             if seg.end_sec <= boundary:
                 continue
             all_segments.append(seg)
