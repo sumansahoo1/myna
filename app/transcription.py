@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import subprocess
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -113,37 +114,47 @@ class LocalFasterWhisperTranscriber(Transcriber):
             segments=segments,
         )
 
+    def _transcribe_one_chunk(self, chunk, model) -> TranscriptResult:
+        raw_segments, info = model.transcribe(
+            str(chunk.wav_path), word_timestamps=False
+        )
+        segments: list[TranscriptSegment] = []
+        parts: list[str] = []
+        offset = chunk.start_sec
+        for seg in raw_segments:
+            txt = seg.text.strip()
+            if not txt:
+                continue
+            segments.append(
+                TranscriptSegment(
+                    start_sec=round(seg.start + offset, 3),
+                    end_sec=round(seg.end + offset, 3),
+                    text=txt,
+                )
+            )
+            parts.append(txt)
+        return TranscriptResult(
+            text=" ".join(parts),
+            language=getattr(info, "language", None),
+            segments=segments,
+        )
+
     def transcribe_chunks(self, chunks: list) -> list[TranscriptResult]:
-        """Transcribe each chunk and offset timestamps to absolute audio time."""
+        """Transcribe each chunk in parallel and offset timestamps to absolute audio time."""
         model = self._get_model()
-        results: list[TranscriptResult] = []
-        for chunk in chunks:
-            raw_segments, info = model.transcribe(
-                str(chunk.wav_path), word_timestamps=False
-            )
-            segments: list[TranscriptSegment] = []
-            parts: list[str] = []
-            offset = chunk.start_sec
-            for seg in raw_segments:
-                txt = seg.text.strip()
-                if not txt:
-                    continue
-                segments.append(
-                    TranscriptSegment(
-                        start_sec=round(seg.start + offset, 3),
-                        end_sec=round(seg.end + offset, 3),
-                        text=txt,
-                    )
-                )
-                parts.append(txt)
-            results.append(
-                TranscriptResult(
-                    text=" ".join(parts),
-                    language=getattr(info, "language", None),
-                    segments=segments,
-                )
-            )
-        return results
+        max_workers = max(1, min(settings.chunk_batch_size, len(chunks)))
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(self._transcribe_one_chunk, chunk, model): idx
+                for idx, chunk in enumerate(chunks)
+            }
+            results: list[TranscriptResult | None] = [None] * len(chunks)
+            for future in futures:
+                idx = futures[future]
+                results[idx] = future.result()
+
+        return [r for r in results if r is not None]
 
 
 def _offset_segments(result: TranscriptResult, offset: float) -> TranscriptResult:
