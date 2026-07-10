@@ -62,3 +62,15 @@ Key fixtures in `conftest.py`:
 - `tmp_video_dir` — redirects `settings.video_storage_dir` to a temp path.
 
 CI runs `pytest tests/ -v --tb=short` on every push/PR. Must install `ffmpeg` before running tests.
+
+## GitHub — Permission Required
+
+**NEVER perform irreversible GitHub actions without explicit permission.** This includes:
+- `git push` (local or via MCP)
+- Creating/updating/merging/closing pull requests
+- Creating/commenting/reacting on issues or PRs
+- Pushing commits, branches, or tags to the remote
+- Deleting branches, files, or releases on GitHub
+- Any GitHub MCP write tool (`github_issue_write`, `github_create_pull_request`, `github_push_files`, `github_add_issue_comment`, etc.)
+
+Local git operations (commit, branch, diff, log) are fine. Ask before anything that touches the remote.
