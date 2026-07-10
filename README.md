@@ -1,69 +1,101 @@
-# Myna Video Backend
+# Myna
 
-FastAPI backend that receives video uploads, stores them locally, and returns meeting IDs. Uses a SQLite database to store meeting_id ↔ video_id mappings.
+Turn meeting videos into speaker-labeled transcripts — entirely on your machine. No cloud. No API keys. No per-minute pricing.
 
-## Setup
+Drop in a video. Get back who said what, when.
+
+**Why Myna:**
+
+- **Fully local** — transcription and speaker identification run on your hardware. Nothing leaves the machine.
+- **Speaker-aware** — not just a wall of text. Every segment tagged with who spoke.
+- **Two modes** — fire-and-forget background jobs, or synchronous calls that return results inline.
+- **Zero-dependency deploy** — ships as a single Docker container with `ffmpeg` and all models bundled.
+
+## Quick start
 
 ```bash
-cd myna
-pip install -r requirements.txt
+cp .env.example .env
+docker compose up
 ```
 
-## Run
+That's it. API running at `http://localhost:8000`.
+
+For local development without Docker:
 
 ```bash
+pip install -r requirements.txt
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-- API docs: http://localhost:8000/docs
-- ReDoc: http://localhost:8000/redoc
+Requires Python 3.10+ and `ffmpeg` on your machine.
 
-## Transcription (local, free)
+## Try it
 
-This MVP transcribes videos **locally** using `faster-whisper` and requires **`ffmpeg`** installed on the machine.
+Interactive API docs — explore every endpoint, make requests, see responses:
 
-Provider switching is controlled by env vars:
+→ [http://localhost:8000/docs](http://localhost:8000/docs)
 
-- `TRANSCRIBER_PROVIDER=local` (default)
-- `WHISPER_MODEL=small` (default; try `base`/`small` for CPU MVP)
-- `WHISPER_DEVICE=cpu` (default; set `cuda` if available)
-
-## Endpoints
-
-### `POST /api/v1/upload`
-
-Upload a video file. Returns `meeting_id` and `video_id`. Transcription runs in background.
-
-**Example (curl):**
+Or from the terminal:
 
 ```bash
-curl -X POST "http://localhost:8000/api/v1/upload" \
-  -H "Content-Type: multipart/form-data" \
-  -F "video=@/path/to/video.mp4"
+curl -F "video=@meeting.mp4" http://localhost:8000/api/v1/upload
 ```
 
-**Response:**
-```json
-{
-  "meeting_id": "550e8400-e29b-41d4-a716-446655440000",
-  "video_id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
-  "message": "Video stored successfully"
-}
+## API
+
+Six endpoints. Two workflows.
+
+| Method | Path | What it does |
+|---|---|---|
+| `GET` | `/health` | Liveness check |
+| `POST` | `/api/v1/upload` | Upload video, process in background. Poll transcript and segments when ready. |
+| `POST` | `/api/v1/upload-and-diarize` | Upload video, block until transcription and diarization complete. Returns everything in one response. |
+| `GET` | `/api/v1/meetings/{id}` | Meeting status, timestamps, file info |
+| `GET` | `/api/v1/meetings/{id}/transcript` | Full transcript as plain text, with detected language |
+| `GET` | `/api/v1/meetings/{id}/segments` | Every utterance as a timestamped segment with speaker label |
+
+**Supported formats:** mp4, avi, mov, webm, mkv, wmv, flv, m4v, mpeg, mpg, 3gp.
+
+## How it works
+
+```
+Upload → ffmpeg extracts audio → faster-whisper transcribes → pyannote identifies speakers → segments merged
 ```
 
-### `GET /api/v1/meetings/{meeting_id}`
+1. **Extract** — `ffmpeg` converts the video to mono 16kHz WAV.
+2. **Transcribe** — `faster-whisper` produces timestamped text segments. Model size is configurable (`tiny` through `large-v3`).
+3. **Diarize & merge** — `pyannote.audio` figures out who spoke when, then each transcript segment gets labeled with the speaker that had the most time overlap. Without a HuggingFace token, all speakers default to `UNKNOWN`.
 
-Retrieve meeting info (meeting_id, video_id, filename) by meeting ID.
+**`/upload`** returns immediately and processes in the background — poll for results.
 
-### `GET /api/v1/meetings/{meeting_id}/transcript`
+**`/upload-and-diarize`** holds the connection until processing finishes and returns segments inline. Good for low-latency use cases or when you want the result in a single request.
 
-Retrieve transcription status and transcript (when ready).
+## Configuration
 
-## Supported Video Formats
+Copy `.env.example` to `.env`. Everything has sensible defaults:
 
-mp4, avi, mov, webm, mkv, wmv, flv, m4v, mpeg, mpg, 3gp
+| Variable | Default | Purpose |
+|---|---|---|
+| `WHISPER_MODEL` | `small` | Model size — `tiny`/`base` for speed, `large-v3` for accuracy |
+| `WHISPER_DEVICE` | `cpu` | Set to `cuda` if you have a GPU |
+| `HF_TOKEN` | — | HuggingFace token to unlock speaker diarization. Get one free at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) and accept the model terms for [pyannote/speaker-diarization-3.1](https://hf.co/pyannote/speaker-diarization-3.1) |
 
 ## Storage
 
-- Videos: `storage/videos/<video_id>.<ext>`
-- Database: `storage/meetings.db` (SQLite)
+```
+storage/videos/<video_id>.<ext>   # uploaded videos
+storage/meetings.db               # SQLite (meetings, transcripts, segments)
+storage/tmp/                      # temporary WAV files, auto-cleaned after processing
+```
+
+## Tests
+
+```bash
+pytest tests/ -v
+```
+
+CI runs the full suite on every push and PR via GitHub Actions.
+
+---
+
+Deeper dive into architecture, data models, and design decisions → [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md).
