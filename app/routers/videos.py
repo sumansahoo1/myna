@@ -338,8 +338,10 @@ def _process_meeting_video(meeting_id: str) -> None:
 
             fut_diarize = executor.submit(diarizer.diarize, audio_path)
 
-            # --- transcription result ---
+            # --- collect both results before committing any state ---
             raw = fut_transcribe.result()
+            speaker_turns: list = fut_diarize.result()
+
             if use_chunks:
                 transcript_result: TranscriptResult = stitch_transcripts(chunks, raw)
             else:
@@ -348,6 +350,7 @@ def _process_meeting_video(meeting_id: str) -> None:
             meeting.transcription_status = TranscriptionStatus.completed
             meeting.transcript_text = transcript_result.text
             meeting.transcript_language = transcript_result.language
+            meeting.diarization_status = TranscriptionStatus.completed
             db.commit()
             logger.info(
                 "_process_meeting_video: meeting_id=%s transcription done language=%s segments=%d",
@@ -355,12 +358,6 @@ def _process_meeting_video(meeting_id: str) -> None:
                 transcript_result.language,
                 len(transcript_result.segments),
             )
-
-            # --- diarization result ---
-            speaker_turns: list = fut_diarize.result()
-
-            meeting.diarization_status = TranscriptionStatus.completed
-            db.commit()
             logger.info(
                 "_process_meeting_video: meeting_id=%s diarization done speakers=%d",
                 meeting_id,
