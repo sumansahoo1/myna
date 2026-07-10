@@ -197,7 +197,6 @@ def _get_audio_duration(path: Path) -> float:
 def stitch_transcripts(
     chunks: list[AudioChunk],
     chunk_results: list[TranscriptResult],
-    overlap: float | None = None,
 ) -> TranscriptResult:
     """
     Merge transcript results from overlapping chunks into a single result.

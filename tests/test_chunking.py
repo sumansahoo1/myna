@@ -144,7 +144,6 @@ class TestStitchTranscripts:
 
     def test_deduplicates_overlap(self):
         """Segments entirely in overlap of previous chunk are dropped."""
-        ov = 5.0
         c1 = AudioChunk(0, 0, 30, 30, Path("a.wav"))
         c2 = AudioChunk(1, 25, 55, 30, Path("b.wav"))  # 5s overlap with c1
 
@@ -168,7 +167,7 @@ class TestStitchTranscripts:
             ],
         )
 
-        stitched = stitch_transcripts([c1, c2], [r1, r2], overlap=ov)
+        stitched = stitch_transcripts([c1, c2], [r1, r2])
         assert len(stitched.segments) == 4  # 2 from r1 + 2 from r2 (dup dropped)
         texts = [s.text for s in stitched.segments]
         assert "dup" not in texts
@@ -185,7 +184,7 @@ class TestStitchTranscripts:
         r2 = TranscriptResult("b", "en", [TranscriptSegment(6, 9, "b1")])
         r3 = TranscriptResult("c", "en", [TranscriptSegment(12, 15, "c1")])
 
-        stitched = stitch_transcripts([c1, c2, c3], [r1, r2, r3], overlap=4.0)
+        stitched = stitch_transcripts([c1, c2, c3], [r1, r2, r3])
         starts = [s.start_sec for s in stitched.segments]
         assert starts == sorted(starts)
 
@@ -195,23 +194,22 @@ class TestStitchTranscripts:
         c2 = AudioChunk(1, 10, 20, 10, Path("b.wav"))
         r1 = TranscriptResult("text", "fr", [TranscriptSegment(0, 5, "bonjour")])
         r2 = TranscriptResult("text", "fr", [TranscriptSegment(10, 15, "monde")])
-        stitched = stitch_transcripts([c1, c2], [r1, r2], overlap=0)
+        stitched = stitch_transcripts([c1, c2], [r1, r2])
         assert stitched.language == "fr"
 
     def test_empty_chunks_returns_empty(self):
-        result = stitch_transcripts([], [], overlap=5.0)
+        result = stitch_transcripts([], [])
         assert result.text == ""
         assert result.segments == []
         assert result.language is None
 
     def test_boundary_exact_overlap(self):
         """Segment ending at boundary is dropped (covered by previous chunk)."""
-        ov = 5.0
         c1 = AudioChunk(0, 0, 30, 30, Path("a.wav"))
         c2 = AudioChunk(1, 25, 55, 30, Path("b.wav"))
         r1 = TranscriptResult("x", "en", [TranscriptSegment(0, 25, "kept")])
         r2 = TranscriptResult("y", "en", [TranscriptSegment(25, 30, "dropped")])
-        stitched = stitch_transcripts([c1, c2], [r1, r2], overlap=ov)
+        stitched = stitch_transcripts([c1, c2], [r1, r2])
         # "dropped" segment ends at 30 which is boundary (c1.end_sec) → dropped
         assert len(stitched.segments) == 1
         assert stitched.segments[0].text == "kept"
