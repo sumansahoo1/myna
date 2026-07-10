@@ -203,11 +203,12 @@ def stitch_transcripts(
 
     for chunk, result in zip(chunks, chunk_results):
         for seg in result.segments:
-            # Drop segments that fall entirely in overlap with previous chunk
+            # Drop segments that fall entirely before previous chunk's end
+            # (they were already covered by the earlier chunk)
             if seg.end_sec <= boundary:
                 continue
             all_segments.append(seg)
-        boundary = chunk.end_sec - ov
+        boundary = chunk.end_sec
 
     # Sort by start time
     all_segments.sort(key=lambda s: s.start_sec)
