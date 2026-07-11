@@ -8,7 +8,6 @@ import aiofiles
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
-from app.chunking import AudioChunk
 from app.config import settings
 from app.database import get_db
 from app.diarization import get_diarizer
@@ -235,13 +234,12 @@ def _process_meeting_video(meeting_id: str) -> None:
     Background pipeline:
       1. Extract audio once
       2. VAD → detect speech regions (skip silence)
-      3. Transcribe (batched GPU or single-file) | Diarize  —  in parallel
+      3. Transcribe (batched GPU) | Diarize  —  in parallel
       4. Merge → assign speakers to segments
       5. Persist results
     """
     db = next(get_db())
     audio_path = None
-    chunk_paths: set[Path] = set()
 
     try:
         meeting = db.query(Meeting).filter(Meeting.meeting_id == meeting_id).first()
@@ -300,24 +298,20 @@ def _process_meeting_video(meeting_id: str) -> None:
                 )
                 speech_regions = None
 
-        # --- batched transcription (replaces file-based chunking + threaded transcribe) ---
-        use_batched = settings.enable_chunking
+        # --- batched transcription ---
+        logger.info(
+            "_process_meeting_video: meeting_id=%s batched transcribe on full audio",
+            meeting_id,
+        )
 
         # --- parallel: transcribe + diarize ---
         transcriber = get_transcriber()
         diarizer = get_diarizer()
 
         with ThreadPoolExecutor(max_workers=2) as executor:
-            if use_batched:
-                logger.info(
-                    "_process_meeting_video: meeting_id=%s batched transcribe on full audio",
-                    meeting_id,
-                )
-                fut_transcribe = executor.submit(
-                    transcriber.transcribe_batched, audio_path, speech_regions
-                )
-            else:
-                fut_transcribe = executor.submit(transcriber.transcribe, audio_path)
+            fut_transcribe = executor.submit(
+                transcriber.transcribe_batched, audio_path, speech_regions
+            )
 
             fut_diarize = executor.submit(diarizer.diarize, audio_path)
 
@@ -374,12 +368,4 @@ def _process_meeting_video(meeting_id: str) -> None:
     finally:
         if audio_path:
             audio_path.unlink(missing_ok=True)
-        for cp in chunk_paths:
-            if cp != audio_path:
-                cp.unlink(missing_ok=True)
         db.close()
-
-
-def _transcribe_chunks(transcriber, chunks: list[AudioChunk]) -> list:
-    """Transcribe chunks and return list of TranscriptResult (one per chunk)."""
-    return transcriber.transcribe_chunks(chunks)

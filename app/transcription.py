@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import subprocess
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -29,14 +28,6 @@ class TranscriptResult:
 class Transcriber:
     def transcribe(self, audio_path: Path) -> TranscriptResult:
         raise NotImplementedError
-
-    def transcribe_chunks(self, chunks: list) -> list[TranscriptResult]:
-        """Transcribe multiple audio chunks. Override for batched optimization."""
-        results: list[TranscriptResult] = []
-        for chunk in chunks:
-            result = self.transcribe(chunk.wav_path)
-            results.append(_offset_segments(result, chunk.start_sec))
-        return results
 
     def transcribe_batched(
         self,
@@ -67,12 +58,6 @@ def get_transcriber() -> Transcriber:
 
 class HostedTranscriberStub(Transcriber):
     def transcribe(self, audio_path: Path) -> TranscriptResult:
-        raise RuntimeError(
-            "Hosted transcription provider is not configured yet. "
-            "Set TRANSCRIBER_PROVIDER=local to use local transcription."
-        )
-
-    def transcribe_chunks(self, chunks: list) -> list[TranscriptResult]:
         raise RuntimeError(
             "Hosted transcription provider is not configured yet. "
             "Set TRANSCRIBER_PROVIDER=local to use local transcription."
@@ -134,48 +119,6 @@ class LocalFasterWhisperTranscriber(Transcriber):
             segments=segments,
         )
 
-    def _transcribe_one_chunk(self, chunk, model) -> TranscriptResult:
-        raw_segments, info = model.transcribe(
-            str(chunk.wav_path), word_timestamps=False
-        )
-        segments: list[TranscriptSegment] = []
-        parts: list[str] = []
-        offset = chunk.start_sec
-        for seg in raw_segments:
-            txt = seg.text.strip()
-            if not txt:
-                continue
-            segments.append(
-                TranscriptSegment(
-                    start_sec=round(seg.start + offset, 3),
-                    end_sec=round(seg.end + offset, 3),
-                    text=txt,
-                )
-            )
-            parts.append(txt)
-        return TranscriptResult(
-            text=" ".join(parts),
-            language=getattr(info, "language", None),
-            segments=segments,
-        )
-
-    def transcribe_chunks(self, chunks: list) -> list[TranscriptResult]:
-        """Transcribe each chunk in parallel and offset timestamps to absolute audio time."""
-        model = self._get_model()
-        max_workers = max(1, min(settings.chunk_batch_size, len(chunks)))
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(self._transcribe_one_chunk, chunk, model): idx
-                for idx, chunk in enumerate(chunks)
-            }
-            results: list[TranscriptResult | None] = [None] * len(chunks)
-            for future in futures:
-                idx = futures[future]
-                results[idx] = future.result()
-
-        return [r for r in results if r is not None]
-
     def transcribe_batched(
         self,
         audio_path: Path,
@@ -188,7 +131,7 @@ class LocalFasterWhisperTranscriber(Transcriber):
         model = self._get_model()
         pipeline = BatchedInferencePipeline(model)
 
-        kwargs: dict = {"batch_size": max(1, min(settings.chunk_batch_size, 8))}
+        kwargs: dict = {"batch_size": 8}
 
         if speech_regions:
             sampling_rate = 16000
@@ -235,21 +178,6 @@ class LocalFasterWhisperTranscriber(Transcriber):
             language=getattr(info, "language", None),
             segments=segments,
         )
-
-
-def _offset_segments(result: TranscriptResult, offset: float) -> TranscriptResult:
-    return TranscriptResult(
-        text=result.text,
-        language=result.language,
-        segments=[
-            TranscriptSegment(
-                start_sec=round(s.start_sec + offset, 3),
-                end_sec=round(s.end_sec + offset, 3),
-                text=s.text,
-            )
-            for s in result.segments
-        ],
-    )
 
 
 def _extract_audio_to_wav(video_path: Path) -> Path:

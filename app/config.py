@@ -66,12 +66,8 @@ class Settings:
     whisper_device: str = os.getenv("WHISPER_DEVICE") or _detect_device()
     diarizer_provider: str = os.getenv("DIARIZER_PROVIDER", "local")
     hf_token: str | None = os.getenv("HF_TOKEN") or None
-    # Phase 1: chunking & VAD
-    chunk_duration_sec: float = _env_float("CHUNK_DURATION_SEC", 30.0)
-    chunk_overlap_sec: float = _env_float("CHUNK_OVERLAP_SEC", 5.0)
-    chunk_batch_size: int = _env_int("CHUNK_BATCH_SIZE", 16)
+    # VAD
     enable_vad: bool = _env_bool("ENABLE_VAD", True)
-    enable_chunking: bool = _env_bool("ENABLE_CHUNKING", True)
 
 
 settings = Settings()

@@ -385,87 +385,6 @@ class TestProcessMeetingVideo:
         assert meeting.transcription_status == TranscriptionStatus.completed
         assert meeting.diarization_status == TranscriptionStatus.completed
 
-    def test_chunking_failure_falls_back(
-        self, db, tmp_video_dir, mock_transcriber, mock_diarizer
-    ):
-        """When ENABLE_CHUNKING is False, falls back to single-file transcribe."""
-        from app.routers.videos import _process_meeting_video
-
-        meeting = Meeting(
-            meeting_id=str(uuid.uuid4()),
-            video_id=str(uuid.uuid4()),
-            filename="test.mp4",
-            transcription_status=TranscriptionStatus.pending,
-            diarization_status=TranscriptionStatus.pending,
-        )
-        db.add(meeting)
-        db.commit()
-
-        fake_wav = tmp_video_dir / "audio.wav"
-        fake_wav.write_text("")
-
-        with (
-            patch("app.routers.videos.get_db", override_get_db),
-            patch("app.routers.videos._extract_audio_to_wav", return_value=fake_wav),
-            patch("app.routers.videos.settings.enable_chunking", False),
-            patch("app.routers.videos.get_transcriber", return_value=mock_transcriber),
-            patch("app.routers.videos.get_diarizer", return_value=mock_diarizer),
-        ):
-            _process_meeting_video(meeting.meeting_id)
-
-        db.expire_all()
-        db.refresh(meeting)
-        assert meeting.transcription_status == TranscriptionStatus.completed
-        mock_transcriber.transcribe.assert_called_once_with(fake_wav)
-
-    def test_chunked_transcription_path(self, db, tmp_video_dir, mock_diarizer):
-        """When ENABLE_CHUNKING is True, uses transcribe_batched."""
-        from app.routers.videos import _process_meeting_video
-
-        meeting = Meeting(
-            meeting_id=str(uuid.uuid4()),
-            video_id=str(uuid.uuid4()),
-            filename="test.mp4",
-            transcription_status=TranscriptionStatus.pending,
-            diarization_status=TranscriptionStatus.pending,
-        )
-        db.add(meeting)
-        db.commit()
-
-        fake_wav = tmp_video_dir / "audio.wav"
-        fake_wav.write_text("")
-
-        batched_transcriber = MagicMock()
-        batched_transcriber.transcribe_batched.return_value = TranscriptResult(
-            "full",
-            "en",
-            [
-                TS(0, 5, "seg0"),
-                TS(25, 30, "seg1"),
-                TS(50, 55, "seg2"),
-            ],
-        )
-
-        with (
-            patch("app.routers.videos.get_db", override_get_db),
-            patch("app.routers.videos._extract_audio_to_wav", return_value=fake_wav),
-            patch("app.routers.videos.settings.enable_chunking", True),
-            patch("app.routers.videos.settings.enable_vad", False),
-            patch(
-                "app.routers.videos.get_transcriber", return_value=batched_transcriber
-            ),
-            patch("app.routers.videos.get_diarizer", return_value=mock_diarizer),
-        ):
-            _process_meeting_video(meeting.meeting_id)
-
-        db.expire_all()
-        db.refresh(meeting)
-        assert meeting.transcription_status == TranscriptionStatus.completed
-        assert meeting.transcript_text == "full"
-        assert meeting.transcript_language == "en"
-        batched_transcriber.transcribe_batched.assert_called_once()
-        batched_transcriber.transcribe.assert_not_called()
-
     def test_parallel_execution_both_complete(
         self, db, tmp_video_dir, mock_transcriber, mock_diarizer
     ):
@@ -503,7 +422,7 @@ class TestProcessMeetingVideo:
     def test_temp_files_cleaned_on_success(
         self, db, tmp_video_dir, mock_transcriber, mock_diarizer
     ):
-        """Audio + chunk temp files deleted after successful pipeline."""
+        """Audio temp files deleted after successful pipeline."""
         from app.routers.videos import _process_meeting_video
 
         meeting = Meeting(
