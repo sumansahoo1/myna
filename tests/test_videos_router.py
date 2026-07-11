@@ -250,7 +250,7 @@ class TestProcessMeetingVideo:
                 "transcribe": lambda self, p: (_ for _ in ()).throw(
                     RuntimeError("model crashed")
                 ),
-                "transcribe_batched": lambda self, p, speech_regions=None, language=None: (
+                "transcribe_batched": lambda self, p, speech_regions=None, language=None, audio_array=None: (
                     (_ for _ in ()).throw(RuntimeError("model crashed"))
                 ),
             },
@@ -271,9 +271,8 @@ class TestProcessMeetingVideo:
         db.expire_all()
         db.refresh(meeting)
         assert meeting.transcription_status == TranscriptionStatus.failed
-        # Both statuses are set to "processing" at the start of the pipeline,
-        # so when an exception occurs, both end up as "failed"
-        assert meeting.diarization_status == TranscriptionStatus.failed
+        # Diarization is skipped when transcription fails (sequential pipeline)
+        assert meeting.diarization_status == TranscriptionStatus.processing
 
     def test_pipeline_diarization_fails(self, db, tmp_video_dir, mock_transcriber):
         """When diarization fails, transcription still succeeds."""
@@ -336,7 +335,7 @@ class TestProcessMeetingVideo:
         with (
             patch("app.routers.videos.get_db", override_get_db),
             patch("app.routers.videos._extract_audio_to_wav", return_value=fake_wav),
-            patch("app.routers.videos.detect_speech_regions", return_value=[]),
+            patch("app.routers.videos.detect_speech_regions", return_value=([], None)),
             patch("app.routers.videos.settings.enable_vad", True),
         ):
             _process_meeting_video(meeting.meeting_id)

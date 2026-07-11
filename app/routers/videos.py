@@ -1,10 +1,13 @@
 import asyncio
+import gc
 import logging
+import random
+import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import aiofiles
+import torch
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
@@ -215,14 +218,50 @@ async def upload_and_diarize(
     )
 
 
+def _free_gpu():
+    """Release GPU memory: trigger GC and clear PyTorch CUDA cache."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _retry_gpu(fn, *args, max_retries: int = 3, **kwargs):
+    """Call *fn* with backoff and CUDA cache clearing on GPU failures.
+    Retries transient errors (OOM, CUDA errors). Non-GPU errors propagate immediately."""
+    base_delay = 2.0
+    last_error: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            last_error = e
+            msg = str(e).lower()
+            is_gpu = any(kw in msg for kw in ("cuda", "out of memory", "gpu"))
+            if not is_gpu or attempt == max_retries:
+                raise
+            delay = base_delay * (2**attempt) + random.uniform(0, 1)
+            logger.warning(
+                "_retry_gpu: attempt %d/%d — %s: %s — retrying in %.1fs",
+                attempt + 1,
+                max_retries,
+                type(e).__name__,
+                e,
+                delay,
+            )
+            torch.cuda.empty_cache()
+            time.sleep(delay)
+    raise last_error  # type: ignore[misc]
+
+
 def _process_meeting_video(meeting_id: str) -> None:
     """
-    Background pipeline:
+    Background pipeline (sequential GPU):
       1. Extract audio once
       2. VAD → detect speech regions (skip silence)
-      3. Transcribe (batched GPU) | Diarize  —  in parallel
-      4. Merge → assign speakers to segments
-      5. Persist results
+      3. Transcribe (batched GPU) → retry on OOM/CUDA errors
+      4. Diarize (GPU) only if transcription succeeded → retry on OOM/CUDA errors
+      5. Merge → assign speakers to segments
+      6. Persist results (partial persistence: transcript saved even if diarization fails)
     """
     db = next(get_db())
     audio_path = None
@@ -256,9 +295,10 @@ def _process_meeting_video(meeting_id: str) -> None:
 
         # --- VAD: detect speech regions ---
         speech_regions = None
+        vad_audio_array = None
         if settings.enable_vad:
             try:
-                speech_regions = detect_speech_regions(audio_path)
+                speech_regions, vad_audio_array = detect_speech_regions(audio_path)
                 if not speech_regions:
                     logger.info(
                         "_process_meeting_video: meeting_id=%s VAD found no speech, "
@@ -284,47 +324,65 @@ def _process_meeting_video(meeting_id: str) -> None:
                 )
                 speech_regions = None
 
-        # --- batched transcription ---
+        # --- sequential GPU: transcribe → diarize ---
+        # Never load both GPU models at once — OOM risk.
         logger.info(
             "_process_meeting_video: meeting_id=%s batched transcribe on full audio",
             meeting_id,
         )
 
-        # --- parallel: transcribe + diarize ---
         transcriber = get_transcriber()
         diarizer = get_diarizer()
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            fut_transcribe = executor.submit(
-                transcriber.transcribe_batched, audio_path, speech_regions
+        transcript_ok = False
+        diarize_ok = False
+        transcript_result = None
+        speaker_turns = None
+
+        try:
+            transcript_result = _retry_gpu(
+                transcriber.transcribe_batched,
+                audio_path,
+                speech_regions,
+                None,  # language
+                vad_audio_array,
             )
-            fut_diarize = executor.submit(diarizer.diarize, audio_path)
+            meeting.transcription_status = TranscriptionStatus.completed
+            meeting.transcript_text = transcript_result.text
+            meeting.transcript_language = transcript_result.language
+            db.commit()
+            transcript_ok = True
+            logger.info(
+                "_process_meeting_video: meeting_id=%s transcription done language=%s segments=%d",
+                meeting_id,
+                transcript_result.language,
+                len(transcript_result.segments),
+            )
+        except Exception as e:
+            logger.error(
+                "_process_meeting_video: meeting_id=%s transcription failed: %s",
+                meeting_id,
+                e,
+            )
+            meeting.transcription_status = TranscriptionStatus.failed
+            meeting.transcript_error = str(e)
+            db.commit()
 
-            # Collect each result independently so one failure doesn't discard the other.
-            transcript_ok = False
-            diarize_ok = False
-            transcript_result = None
-            speaker_turns = None
+        # Free whisper GPU model before diarization (or on failure).
+        del transcriber
+        _free_gpu()
 
+        if transcript_ok:
             try:
-                transcript_result = fut_transcribe.result()
-                meeting.transcription_status = TranscriptionStatus.completed
-                meeting.transcript_text = transcript_result.text
-                meeting.transcript_language = transcript_result.language
-                transcript_ok = True
-            except Exception as e:
-                logger.error(
-                    "_process_meeting_video: meeting_id=%s transcription failed: %s",
-                    meeting_id,
-                    e,
-                )
-                meeting.transcription_status = TranscriptionStatus.failed
-                meeting.transcript_error = str(e)
-
-            try:
-                speaker_turns = fut_diarize.result()
+                speaker_turns = _retry_gpu(diarizer.diarize, audio_path)
                 meeting.diarization_status = TranscriptionStatus.completed
                 diarize_ok = True
+                db.commit()
+                logger.info(
+                    "_process_meeting_video: meeting_id=%s diarization done speakers=%d",
+                    meeting_id,
+                    len(set(t.speaker_label for t in speaker_turns)),
+                )
             except Exception as e:
                 logger.error(
                     "_process_meeting_video: meeting_id=%s diarization failed: %s",
@@ -333,22 +391,10 @@ def _process_meeting_video(meeting_id: str) -> None:
                 )
                 meeting.diarization_status = TranscriptionStatus.failed
                 meeting.diarization_error = str(e)
+                db.commit()
 
-            db.commit()
-
-            if transcript_ok:
-                logger.info(
-                    "_process_meeting_video: meeting_id=%s transcription done language=%s segments=%d",
-                    meeting_id,
-                    transcript_result.language,
-                    len(transcript_result.segments),
-                )
-            if diarize_ok:
-                logger.info(
-                    "_process_meeting_video: meeting_id=%s diarization done speakers=%d",
-                    meeting_id,
-                    len(set(t.speaker_label for t in speaker_turns)),
-                )
+            del diarizer
+            _free_gpu()
 
         # --- merge & persist segments ---
         if transcript_ok and diarize_ok:
@@ -403,4 +449,5 @@ def _process_meeting_video(meeting_id: str) -> None:
     finally:
         if audio_path:
             audio_path.unlink(missing_ok=True)
+        _free_gpu()
         db.close()
