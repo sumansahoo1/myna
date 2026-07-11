@@ -68,6 +68,8 @@ class Settings:
     hf_token: str | None = os.getenv("HF_TOKEN") or None
     # VAD
     enable_vad: bool = _env_bool("ENABLE_VAD", True)
+    # Batched inference
+    chunk_batch_size: int = _env_int("CHUNK_BATCH_SIZE", 8)
 
 
 settings = Settings()

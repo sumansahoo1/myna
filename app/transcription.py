@@ -131,7 +131,7 @@ class LocalFasterWhisperTranscriber(Transcriber):
         model = self._get_model()
         pipeline = BatchedInferencePipeline(model)
 
-        kwargs: dict = {"batch_size": 8}
+        kwargs: dict = {"batch_size": settings.chunk_batch_size}
 
         if speech_regions:
             sampling_rate = 16000
