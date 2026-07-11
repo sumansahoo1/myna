@@ -29,27 +29,13 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-ALLOWED_EXTENSIONS = {
-    ".mp4",
-    ".avi",
-    ".mov",
-    ".webm",
-    ".mkv",
-    ".wmv",
-    ".flv",
-    ".m4v",
-    ".mpeg",
-    ".mpg",
-    ".3gp",
-}
-
 
 def get_file_extension(filename: str) -> str:
     return Path(filename).suffix.lower()
 
 
 def is_valid_video_format(filename: str) -> bool:
-    return get_file_extension(filename) in ALLOWED_EXTENSIONS
+    return get_file_extension(filename) in settings.allowed_extensions
 
 
 @router.post("/upload", response_model=VideoUploadResponse)
@@ -64,7 +50,7 @@ async def upload_video(
     if not is_valid_video_format(video.filename):
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid video format. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
+            detail=f"Invalid video format. Allowed: {', '.join(sorted(settings.allowed_extensions))}",
         )
 
     meeting_id = str(uuid.uuid4())
@@ -159,7 +145,7 @@ async def upload_and_diarize(
     if not is_valid_video_format(video.filename):
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid video format. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
+            detail=f"Invalid video format. Allowed: {', '.join(sorted(settings.allowed_extensions))}",
         )
 
     meeting_id = str(uuid.uuid4())

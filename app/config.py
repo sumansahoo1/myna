@@ -33,6 +33,9 @@ ALLOWED_VIDEO_EXTENSIONS = {
     ".wmv",
     ".flv",
     ".m4v",
+    ".mpeg",
+    ".mpg",
+    ".3gp",
 }
 
 
