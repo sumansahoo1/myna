@@ -78,13 +78,14 @@ class TestDetectSpeechRegions:
             mock_load.return_value = (mock_model, mock_utils)
 
             with patch("app.vad._read_audio_manual", return_value=MagicMock()):
-                regions = detect_speech_regions(wav)
+                regions, audio = detect_speech_regions(wav)
 
         assert len(regions) == 2
         assert regions[0].start_sec == pytest.approx(0.1)
         assert regions[0].end_sec == pytest.approx(0.5)
         assert regions[1].start_sec == pytest.approx(1.0)
         assert regions[1].end_sec == pytest.approx(1.75)
+        assert audio is not None
 
     def test_no_speech_returns_empty(self, tmp_path: Path):
         """Empty timestamp list → empty regions."""
@@ -96,9 +97,10 @@ class TestDetectSpeechRegions:
             mock_load.return_value = (mock_model, mock_utils)
 
             with patch("app.vad._read_audio_manual", return_value=MagicMock()):
-                regions = detect_speech_regions(wav)
+                regions, audio = detect_speech_regions(wav)
 
         assert regions == []
+        assert audio is not None
 
     def test_model_loaded_once(self, tmp_path: Path):
         """VAD model is cached after first load."""

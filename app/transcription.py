@@ -6,6 +6,8 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
+
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -34,8 +36,10 @@ class Transcriber:
         audio_path: Path,
         speech_regions: list | None = None,
         language: str | None = None,
+        audio_array: np.ndarray | None = None,
     ) -> TranscriptResult:
-        """Transcribe full audio with batched GPU inference. Override for optimization."""
+        """Transcribe full audio with batched GPU inference. Override for optimization.
+        If audio_array is provided it is used directly, skipping file decode."""
         return self.transcribe(audio_path)
 
 
@@ -68,6 +72,7 @@ class HostedTranscriberStub(Transcriber):
         audio_path: Path,
         speech_regions: list | None = None,
         language: str | None = None,
+        audio_array: np.ndarray | None = None,
     ) -> TranscriptResult:
         raise RuntimeError(
             "Hosted transcription provider is not configured yet. "
@@ -124,6 +129,7 @@ class LocalFasterWhisperTranscriber(Transcriber):
         audio_path: Path,
         speech_regions: list | None = None,
         language: str | None = None,
+        audio_array: np.ndarray | None = None,
     ) -> TranscriptResult:
         """Transcribe full audio using BatchedInferencePipeline for true GPU batching."""
         from faster_whisper import BatchedInferencePipeline
@@ -134,7 +140,6 @@ class LocalFasterWhisperTranscriber(Transcriber):
         kwargs: dict = {"batch_size": settings.batch_size}
 
         if speech_regions:
-            # Read actual sample rate from WAV metadata (cheap, no decode)
             import wave
 
             with wave.open(str(audio_path), "rb") as wf:
@@ -148,19 +153,21 @@ class LocalFasterWhisperTranscriber(Transcriber):
             ]
             kwargs["clip_timestamps"] = clip_timestamps
             kwargs["vad_filter"] = False
-        # else: let BatchedInferencePipeline run its own VAD (vad_filter=True by default)
 
         if language:
             kwargs["language"] = language
 
+        audio_input = audio_array if audio_array is not None else str(audio_path)
+
         logger.info(
-            "batched transcribe: audio=%s speech_regions=%d batch_size=%d",
+            "batched transcribe: audio=%s speech_regions=%d batch_size=%d from_array=%s",
             audio_path.name,
             len(speech_regions) if speech_regions else 0,
             kwargs["batch_size"],
+            audio_array is not None,
         )
 
-        raw_segments, info = pipeline.transcribe(str(audio_path), **kwargs)
+        raw_segments, info = pipeline.transcribe(audio_input, **kwargs)
 
         segments: list[TranscriptSegment] = []
         parts: list[str] = []

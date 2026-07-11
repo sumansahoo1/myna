@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import torch
 
 logger = logging.getLogger(__name__)
@@ -44,10 +45,11 @@ def detect_speech_regions(
     min_speech_duration_ms: int = 250,
     min_silence_duration_ms: int = 100,
     speech_pad_ms: int = 30,
-) -> list[SpeechRegion]:
+) -> tuple[list[SpeechRegion], np.ndarray]:
     """
-    Returns list of (start_sec, end_sec) speech regions found in audio file.
-    Non-speech (silence, music, noise) is excluded.
+    Returns (list[SpeechRegion], numpy audio array at sample_rate Hz).
+    Caller can reuse the returned audio to avoid re-decoding for transcription.
+    Non-speech (silence, music, noise) is excluded from regions.
     """
     model, utils = _load_vad()
     get_speech_timestamps = utils[0]
@@ -76,7 +78,7 @@ def detect_speech_regions(
         audio_path.name,
         sum(r.end_sec - r.start_sec for r in regions),
     )
-    return regions
+    return regions, wav.numpy()
 
 
 def _read_audio_manual(path: Path) -> "torch.Tensor":
