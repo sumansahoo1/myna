@@ -44,25 +44,25 @@ class TestHostedDiarizerStub:
 
 class TestGetDiarizer:
     def test_local_no_token_returns_noop(self, monkeypatch):
-        monkeypatch.delenv("HF_TOKEN", raising=False)
-        monkeypatch.setenv("DIARIZER_PROVIDER", "local")
+        monkeypatch.setattr("app.diarization.settings.hf_token", None)
+        monkeypatch.setattr("app.diarization.settings.diarizer_provider", "local")
         result = get_diarizer()
         assert isinstance(result, NoopDiarizer)
 
     def test_local_with_token_returns_local(self, monkeypatch):
-        monkeypatch.setenv("HF_TOKEN", "dummy_token")
-        monkeypatch.setenv("DIARIZER_PROVIDER", "local")
+        monkeypatch.setattr("app.diarization.settings.hf_token", "dummy_token")
+        monkeypatch.setattr("app.diarization.settings.diarizer_provider", "local")
         result = get_diarizer()
         from app.diarization import LocalPyannoteDializer
 
         assert isinstance(result, LocalPyannoteDializer)
 
     def test_hosted_returns_stub(self, monkeypatch):
-        monkeypatch.setenv("DIARIZER_PROVIDER", "hosted")
+        monkeypatch.setattr("app.diarization.settings.diarizer_provider", "hosted")
         result = get_diarizer()
         assert isinstance(result, HostedDiarizerStub)
 
     def test_unknown_provider_raises_value_error(self, monkeypatch):
-        monkeypatch.setenv("DIARIZER_PROVIDER", "nonexistent")
+        monkeypatch.setattr("app.diarization.settings.diarizer_provider", "nonexistent")
         with pytest.raises(ValueError, match="Unknown diarizer provider"):
             get_diarizer()

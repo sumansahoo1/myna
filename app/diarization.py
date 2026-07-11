@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -23,10 +22,10 @@ class Diarizer:
 
 
 def get_diarizer() -> Diarizer:
-    provider = (
-        os.getenv("DIARIZER_PROVIDER", settings.diarizer_provider).strip().lower()
-    )
-    hf_token = os.getenv("HF_TOKEN", settings.hf_token or "").strip()
+    provider = settings.diarizer_provider.strip().lower()
+    hf_token = (settings.hf_token or "").strip()
+
+    device = settings.diarization_device
 
     if provider == "local":
         if not hf_token:
@@ -34,8 +33,10 @@ def get_diarizer() -> Diarizer:
                 "diarizer: no HF_TOKEN, using NoopDiarizer (all speakers=UNKNOWN)"
             )
             return NoopDiarizer()
-        logger.info("diarizer: local pyannote with HF_TOKEN")
-        return LocalPyannoteDializer(hf_token=hf_token, num_speakers=None)
+        logger.info("diarizer: local pyannote with HF_TOKEN device=%s", device)
+        return LocalPyannoteDializer(
+            hf_token=hf_token, num_speakers=None, device=device
+        )
     if provider == "hosted":
         logger.info("diarizer: hosted stub selected")
         return HostedDiarizerStub()
@@ -76,9 +77,12 @@ class LocalPyannoteDializer(Diarizer):
       - Set HF_TOKEN env var or HUGGINGFACE_TOKEN in config.
     """
 
-    def __init__(self, hf_token: str, num_speakers: int | None = None):
+    def __init__(
+        self, hf_token: str, num_speakers: int | None = None, device: str = "cpu"
+    ):
         self._hf_token = hf_token
         self._num_speakers = num_speakers
+        self._device = device
         self._pipeline = None
 
     def _get_pipeline(self):
@@ -98,6 +102,11 @@ class LocalPyannoteDializer(Diarizer):
                     "Verify HF_TOKEN is set and you accepted the user conditions at "
                     "https://hf.co/pyannote/speaker-diarization-3.1"
                 )
+            if self._device == "cuda":
+                import torch
+
+                pipeline.to(torch.device("cuda"))
+                logger.info("pyannote pipeline moved to cuda")
             self._pipeline = pipeline
             logger.info("pyannote pipeline loaded")
         return self._pipeline

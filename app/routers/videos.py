@@ -1,9 +1,13 @@
 import asyncio
+import gc
 import logging
+import random
+import time
 import uuid
 from pathlib import Path
 
 import aiofiles
+import torch
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
@@ -21,25 +25,12 @@ from app.schemas import (
     TranscriptionStatus,
     VideoUploadResponse,
 )
-from app.transcription import get_transcriber, _extract_audio_to_wav
+from app.transcription import TranscriptResult, get_transcriber, _extract_audio_to_wav
+from app.vad import detect_speech_regions
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-ALLOWED_EXTENSIONS = {
-    ".mp4",
-    ".avi",
-    ".mov",
-    ".webm",
-    ".mkv",
-    ".wmv",
-    ".flv",
-    ".m4v",
-    ".mpeg",
-    ".mpg",
-    ".3gp",
-}
 
 
 def get_file_extension(filename: str) -> str:
@@ -47,7 +38,7 @@ def get_file_extension(filename: str) -> str:
 
 
 def is_valid_video_format(filename: str) -> bool:
-    return get_file_extension(filename) in ALLOWED_EXTENSIONS
+    return get_file_extension(filename) in settings.allowed_extensions
 
 
 @router.post("/upload", response_model=VideoUploadResponse)
@@ -62,7 +53,7 @@ async def upload_video(
     if not is_valid_video_format(video.filename):
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid video format. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
+            detail=f"Invalid video format. Allowed: {', '.join(sorted(settings.allowed_extensions))}",
         )
 
     meeting_id = str(uuid.uuid4())
@@ -157,7 +148,7 @@ async def upload_and_diarize(
     if not is_valid_video_format(video.filename):
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid video format. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
+            detail=f"Invalid video format. Allowed: {', '.join(sorted(settings.allowed_extensions))}",
         )
 
     meeting_id = str(uuid.uuid4())
@@ -227,14 +218,50 @@ async def upload_and_diarize(
     )
 
 
+def _free_gpu():
+    """Release GPU memory: trigger GC and clear PyTorch CUDA cache."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _retry_gpu(fn, *args, max_retries: int = 3, **kwargs):
+    """Call *fn* with backoff and CUDA cache clearing on GPU failures.
+    Retries transient errors (OOM, CUDA errors). Non-GPU errors propagate immediately."""
+    base_delay = 2.0
+    last_error: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            last_error = e
+            msg = str(e).lower()
+            is_gpu = any(kw in msg for kw in ("cuda", "out of memory", "gpu"))
+            if not is_gpu or attempt == max_retries:
+                raise
+            delay = base_delay * (2**attempt) + random.uniform(0, 1)
+            logger.warning(
+                "_retry_gpu: attempt %d/%d — %s: %s — retrying in %.1fs",
+                attempt + 1,
+                max_retries,
+                type(e).__name__,
+                e,
+                delay,
+            )
+            torch.cuda.empty_cache()
+            time.sleep(delay)
+    raise last_error  # type: ignore[misc]
+
+
 def _process_meeting_video(meeting_id: str) -> None:
     """
-    Background pipeline:
+    Background pipeline (sequential GPU):
       1. Extract audio once
-      2. Transcribe (faster-whisper) → timestamped segments
-      3. Diarize (pyannote) → speaker turns
-      4. Merge → assign speakers to segments
-      5. Persist results
+      2. VAD → detect speech regions (skip silence)
+      3. Transcribe (batched GPU) → retry on OOM/CUDA errors
+      4. Diarize (GPU) only if transcription succeeded → retry on OOM/CUDA errors
+      5. Merge → assign speakers to segments
+      6. Persist results (partial persistence: transcript saved even if diarization fails)
     """
     db = next(get_db())
     audio_path = None
@@ -266,55 +293,145 @@ def _process_meeting_video(meeting_id: str) -> None:
             audio_path,
         )
 
-        # --- transcription ---
+        # --- VAD: detect speech regions ---
+        speech_regions = None
+        vad_audio_array = None
+        if settings.enable_vad:
+            try:
+                speech_regions, vad_audio_array = detect_speech_regions(audio_path)
+                if not speech_regions:
+                    logger.info(
+                        "_process_meeting_video: meeting_id=%s VAD found no speech, "
+                        "returning empty transcript",
+                        meeting_id,
+                    )
+                    meeting.transcription_status = TranscriptionStatus.completed
+                    meeting.transcript_text = ""
+                    meeting.transcript_language = None
+                    meeting.diarization_status = TranscriptionStatus.completed
+                    db.commit()
+                    db.query(SegmentModel).filter(
+                        SegmentModel.meeting_id == meeting_id
+                    ).delete()
+                    db.commit()
+                    return
+            except Exception as e:
+                logger.warning(
+                    "_process_meeting_video: meeting_id=%s VAD failed (%s), "
+                    "proceeding without VAD",
+                    meeting_id,
+                    e,
+                )
+                speech_regions = None
+
+        # --- sequential GPU: transcribe → diarize ---
+        # Never load both GPU models at once — OOM risk.
         logger.info(
-            "_process_meeting_video: meeting_id=%s starting transcription", meeting_id
+            "_process_meeting_video: meeting_id=%s batched transcribe on full audio",
+            meeting_id,
         )
+
         transcriber = get_transcriber()
-        transcript_result = transcriber.transcribe(audio_path)
-
-        meeting.transcription_status = TranscriptionStatus.completed
-        meeting.transcript_text = transcript_result.text
-        meeting.transcript_language = transcript_result.language
-        db.commit()
-        logger.info(
-            "_process_meeting_video: meeting_id=%s transcription done language=%s segments=%d",
-            meeting_id,
-            transcript_result.language,
-            len(transcript_result.segments),
-        )
-
-        # --- diarization ---
-        logger.info(
-            "_process_meeting_video: meeting_id=%s starting diarization", meeting_id
-        )
         diarizer = get_diarizer()
-        speaker_turns = diarizer.diarize(audio_path)
 
-        meeting.diarization_status = TranscriptionStatus.completed
-        db.commit()
-        logger.info(
-            "_process_meeting_video: meeting_id=%s diarization done speakers=%d",
-            meeting_id,
-            len(set(t.speaker_label for t in speaker_turns)),
-        )
+        transcript_ok = False
+        diarize_ok = False
+        transcript_result = None
+        speaker_turns = None
+
+        try:
+            transcript_result = _retry_gpu(
+                transcriber.transcribe_batched,
+                audio_path,
+                speech_regions,
+                None,  # language
+                vad_audio_array,
+            )
+            meeting.transcription_status = TranscriptionStatus.completed
+            meeting.transcript_text = transcript_result.text
+            meeting.transcript_language = transcript_result.language
+            db.commit()
+            transcript_ok = True
+            logger.info(
+                "_process_meeting_video: meeting_id=%s transcription done language=%s segments=%d",
+                meeting_id,
+                transcript_result.language,
+                len(transcript_result.segments),
+            )
+        except Exception as e:
+            logger.error(
+                "_process_meeting_video: meeting_id=%s transcription failed: %s",
+                meeting_id,
+                e,
+            )
+            meeting.transcription_status = TranscriptionStatus.failed
+            meeting.transcript_error = str(e)
+            db.commit()
+
+        # Free whisper GPU model before diarization (or on failure).
+        del transcriber
+        _free_gpu()
+
+        if transcript_ok:
+            try:
+                speaker_turns = _retry_gpu(diarizer.diarize, audio_path)
+                meeting.diarization_status = TranscriptionStatus.completed
+                diarize_ok = True
+                db.commit()
+                logger.info(
+                    "_process_meeting_video: meeting_id=%s diarization done speakers=%d",
+                    meeting_id,
+                    len(set(t.speaker_label for t in speaker_turns)),
+                )
+            except Exception as e:
+                logger.error(
+                    "_process_meeting_video: meeting_id=%s diarization failed: %s",
+                    meeting_id,
+                    e,
+                )
+                meeting.diarization_status = TranscriptionStatus.failed
+                meeting.diarization_error = str(e)
+                db.commit()
+
+            del diarizer
+            _free_gpu()
 
         # --- merge & persist segments ---
-        logger.info(
-            "_process_meeting_video: meeting_id=%s merging segments with speakers",
-            meeting_id,
-        )
-        merged = assign_speakers(transcript_result.segments, speaker_turns)
+        if transcript_ok and diarize_ok:
+            logger.info(
+                "_process_meeting_video: meeting_id=%s merging segments with speakers",
+                meeting_id,
+            )
+            merged = assign_speakers(transcript_result.segments, speaker_turns)
+        elif transcript_ok:
+            logger.info(
+                "_process_meeting_video: meeting_id=%s persisting transcript-only segments (no diarization)",
+                meeting_id,
+            )
+            merged = [
+                {
+                    "start_sec": seg.start_sec,
+                    "end_sec": seg.end_sec,
+                    "text": seg.text,
+                    "speaker_label": "UNKNOWN",
+                }
+                for seg in transcript_result.segments
+            ]
+        else:
+            merged = []
 
-        db.query(SegmentModel).filter(SegmentModel.meeting_id == meeting_id).delete()
-        for row in merged:
-            db.add(SegmentModel(meeting_id=meeting_id, **row))
-        db.commit()
-        logger.info(
-            "_process_meeting_video: meeting_id=%s persisted %d segments",
-            meeting_id,
-            len(merged),
-        )
+        if merged:
+            db.query(SegmentModel).filter(
+                SegmentModel.meeting_id == meeting_id
+            ).delete()
+            for row in merged:
+                db.add(SegmentModel(meeting_id=meeting_id, **row))
+            db.commit()
+            logger.info(
+                "_process_meeting_video: meeting_id=%s persisted %d segments",
+                meeting_id,
+                len(merged),
+            )
 
     except Exception as e:
         logger.error("_process_meeting_video: meeting_id=%s FAILED: %s", meeting_id, e)
@@ -332,4 +449,5 @@ def _process_meeting_video(meeting_id: str) -> None:
     finally:
         if audio_path:
             audio_path.unlink(missing_ok=True)
+        _free_gpu()
         db.close()

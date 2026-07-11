@@ -59,12 +59,13 @@ Six endpoints. Two workflows.
 ## How it works
 
 ```
-Upload → ffmpeg extracts audio → faster-whisper transcribes → pyannote identifies speakers → segments merged
+Upload → ffmpeg extracts audio → VAD detects speech regions → faster-whisper transcribes → pyannote identifies speakers → segments merged
 ```
 
 1. **Extract** — `ffmpeg` converts the video to mono 16kHz WAV.
-2. **Transcribe** — `faster-whisper` produces timestamped text segments. Model size is configurable (`tiny` through `large-v3`).
-3. **Diarize & merge** — `pyannote.audio` figures out who spoke when, then each transcript segment gets labeled with the speaker that had the most time overlap. Without a HuggingFace token, all speakers default to `UNKNOWN`.
+2. **VAD** — Silero VAD detects speech regions, skipping silence/noise. Gated by `ENABLE_VAD` (default on).
+3. **Transcribe** — `faster-whisper` produces timestamped text segments. Model size is configurable (`tiny` through `large-v3`).
+4. **Diarize & merge** — `pyannote.audio` figures out who spoke when, then each transcript segment gets labeled with the speaker that had the most time overlap. Without a HuggingFace token, all speakers default to `UNKNOWN`.
 
 **`/upload`** returns immediately and processes in the background — poll for results.
 
@@ -77,8 +78,11 @@ Copy `.env.example` to `.env`. Everything has sensible defaults:
 | Variable | Default | Purpose |
 |---|---|---|
 | `WHISPER_MODEL` | `small` | Model size — `tiny`/`base` for speed, `large-v3` for accuracy |
-| `WHISPER_DEVICE` | `cpu` | Set to `cuda` if you have a GPU |
+| `WHISPER_DEVICE` | auto | Auto-detects CUDA. Set explicitly to `cpu` or `cuda` to override. |
 | `HF_TOKEN` | — | HuggingFace token to unlock speaker diarization. Get one free at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) and accept the model terms for [pyannote/speaker-diarization-3.1](https://hf.co/pyannote/speaker-diarization-3.1) |
+| `ENABLE_VAD` | `true` | Toggle Silero VAD pre-filtering — skips silence/noise before transcription |
+| `INFERENCE_BATCH_SIZE` | `8` | GPU batch size for faster-whisper batched inference |
+| `DIARIZATION_DEVICE` | auto | `cpu` or `cuda` for pyannote pipeline. Auto-detects like `WHISPER_DEVICE`. |
 
 ## Storage
 
