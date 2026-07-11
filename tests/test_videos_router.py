@@ -7,7 +7,7 @@ TestProcessMeetingVideo.
 
 import uuid
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -16,6 +16,7 @@ from app.config import settings
 from app.models import Meeting
 from app.schemas import TranscriptionStatus
 from app.database import get_db
+from app.transcription import TranscriptResult, TranscriptSegment as TS
 from tests.conftest import override_get_db
 
 
@@ -248,7 +249,10 @@ class TestProcessMeetingVideo:
             {
                 "transcribe": lambda self, p: (_ for _ in ()).throw(
                     RuntimeError("model crashed")
-                )
+                ),
+                "transcribe_batched": lambda self, p, speech_regions=None, language=None, audio_array=None: (
+                    (_ for _ in ()).throw(RuntimeError("model crashed"))
+                ),
             },
         )()
 
@@ -267,9 +271,8 @@ class TestProcessMeetingVideo:
         db.expire_all()
         db.refresh(meeting)
         assert meeting.transcription_status == TranscriptionStatus.failed
-        # Both statuses are set to "processing" at the start of the pipeline,
-        # so when an exception occurs, both end up as "failed"
-        assert meeting.diarization_status == TranscriptionStatus.failed
+        # Diarization is skipped when transcription fails (sequential pipeline)
+        assert meeting.diarization_status == TranscriptionStatus.processing
 
     def test_pipeline_diarization_fails(self, db, tmp_video_dir, mock_transcriber):
         """When diarization fails, transcription still succeeds."""
@@ -305,6 +308,171 @@ class TestProcessMeetingVideo:
             patch("app.routers.videos.get_diarizer", return_value=failing_diarizer),
         ):
             _process_meeting_video(meeting.meeting_id)
+
+        db.expire_all()
+        db.refresh(meeting)
+        # Transcription succeeds independently; only diarization is marked failed
+        assert meeting.transcription_status == TranscriptionStatus.completed
+        assert meeting.diarization_status == TranscriptionStatus.failed
+
+    def test_vad_no_speech_short_circuits(self, db, tmp_video_dir):
+        """VAD detects no speech → pipeline returns empty early."""
+        from app.routers.videos import _process_meeting_video
+
+        meeting = Meeting(
+            meeting_id=str(uuid.uuid4()),
+            video_id=str(uuid.uuid4()),
+            filename="test.mp4",
+            transcription_status=TranscriptionStatus.pending,
+            diarization_status=TranscriptionStatus.pending,
+        )
+        db.add(meeting)
+        db.commit()
+
+        fake_wav = tmp_video_dir / "audio.wav"
+        fake_wav.write_text("")
+
+        with (
+            patch("app.routers.videos.get_db", override_get_db),
+            patch("app.routers.videos._extract_audio_to_wav", return_value=fake_wav),
+            patch("app.routers.videos.detect_speech_regions", return_value=([], None)),
+            patch("app.routers.videos.settings.enable_vad", True),
+        ):
+            _process_meeting_video(meeting.meeting_id)
+
+        db.expire_all()
+        db.refresh(meeting)
+        assert meeting.transcription_status == TranscriptionStatus.completed
+        assert meeting.transcript_text == ""
+        assert meeting.diarization_status == TranscriptionStatus.completed
+
+    def test_vad_failure_falls_back(
+        self, db, tmp_video_dir, mock_transcriber, mock_diarizer
+    ):
+        """VAD raises → pipeline proceeds without VAD, uses full audio."""
+        from app.routers.videos import _process_meeting_video
+
+        meeting = Meeting(
+            meeting_id=str(uuid.uuid4()),
+            video_id=str(uuid.uuid4()),
+            filename="test.mp4",
+            transcription_status=TranscriptionStatus.pending,
+            diarization_status=TranscriptionStatus.pending,
+        )
+        db.add(meeting)
+        db.commit()
+
+        fake_wav = tmp_video_dir / "audio.wav"
+        fake_wav.write_text("")
+
+        with (
+            patch("app.routers.videos.get_db", override_get_db),
+            patch("app.routers.videos._extract_audio_to_wav", return_value=fake_wav),
+            patch(
+                "app.routers.videos.detect_speech_regions",
+                side_effect=RuntimeError("VAD crash"),
+            ),
+            patch("app.routers.videos.settings.enable_vad", True),
+            patch("app.routers.videos.get_transcriber", return_value=mock_transcriber),
+            patch("app.routers.videos.get_diarizer", return_value=mock_diarizer),
+        ):
+            _process_meeting_video(meeting.meeting_id)
+
+        db.expire_all()
+        db.refresh(meeting)
+        assert meeting.transcription_status == TranscriptionStatus.completed
+        assert meeting.diarization_status == TranscriptionStatus.completed
+
+    def test_parallel_execution_both_complete(
+        self, db, tmp_video_dir, mock_transcriber, mock_diarizer
+    ):
+        """Transcription + diarization both complete in parallel."""
+        from app.routers.videos import _process_meeting_video
+
+        meeting = Meeting(
+            meeting_id=str(uuid.uuid4()),
+            video_id=str(uuid.uuid4()),
+            filename="test.mp4",
+            transcription_status=TranscriptionStatus.pending,
+            diarization_status=TranscriptionStatus.pending,
+        )
+        db.add(meeting)
+        db.commit()
+
+        fake_wav = tmp_video_dir / "audio.wav"
+        fake_wav.write_text("")
+
+        with (
+            patch("app.routers.videos.get_db", override_get_db),
+            patch("app.routers.videos._extract_audio_to_wav", return_value=fake_wav),
+            patch("app.routers.videos.get_transcriber", return_value=mock_transcriber),
+            patch("app.routers.videos.get_diarizer", return_value=mock_diarizer),
+        ):
+            _process_meeting_video(meeting.meeting_id)
+
+        db.expire_all()
+        db.refresh(meeting)
+        assert meeting.transcription_status == TranscriptionStatus.completed
+        assert meeting.diarization_status == TranscriptionStatus.completed
+        mock_transcriber.transcribe_batched.assert_called_once()
+        mock_diarizer.diarize.assert_called_once()
+
+    def test_temp_files_cleaned_on_success(
+        self, db, tmp_video_dir, mock_transcriber, mock_diarizer
+    ):
+        """Audio temp files deleted after successful pipeline."""
+        from app.routers.videos import _process_meeting_video
+
+        meeting = Meeting(
+            meeting_id=str(uuid.uuid4()),
+            video_id=str(uuid.uuid4()),
+            filename="test.mp4",
+            transcription_status=TranscriptionStatus.pending,
+            diarization_status=TranscriptionStatus.pending,
+        )
+        db.add(meeting)
+        db.commit()
+
+        fake_wav = tmp_video_dir / "audio.wav"
+        fake_wav.write_text("")
+
+        with (
+            patch("app.routers.videos.get_db", override_get_db),
+            patch("app.routers.videos._extract_audio_to_wav", return_value=fake_wav),
+            patch("app.routers.videos.get_transcriber", return_value=mock_transcriber),
+            patch("app.routers.videos.get_diarizer", return_value=mock_diarizer),
+        ):
+            _process_meeting_video(meeting.meeting_id)
+
+        assert not fake_wav.exists()
+
+    def test_temp_files_cleaned_on_failure(self, db, tmp_video_dir):
+        """Audio temp file deleted even when pipeline fails."""
+        from app.routers.videos import _process_meeting_video
+
+        meeting = Meeting(
+            meeting_id=str(uuid.uuid4()),
+            video_id=str(uuid.uuid4()),
+            filename="test.mp4",
+            transcription_status=TranscriptionStatus.pending,
+            diarization_status=TranscriptionStatus.pending,
+        )
+        db.add(meeting)
+        db.commit()
+
+        fake_wav = tmp_video_dir / "audio.wav"
+        fake_wav.write_text("")
+
+        with (
+            patch("app.routers.videos.get_db", override_get_db),
+            patch("app.routers.videos._extract_audio_to_wav", return_value=fake_wav),
+            patch(
+                "app.routers.videos.get_transcriber", side_effect=RuntimeError("boom")
+            ),
+        ):
+            _process_meeting_video(meeting.meeting_id)
+
+        assert not fake_wav.exists()
 
 
 # ── POST /api/v1/upload-and-diarize ──────────────────────────────────────

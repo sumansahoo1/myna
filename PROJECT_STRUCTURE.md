@@ -20,6 +20,7 @@ myna/
 │   ├── transcription.py     # Audio transcription (faster-whisper)
 │   ├── diarization.py       # Speaker diarization (pyannote.audio)
 │   ├── merge.py             # Merge transcription segments with speaker turns
+│   ├── vad.py               # Silero VAD — detect speech regions, skip silence
 │   └── routers/
 │       ├── __init__.py
 │       └── videos.py        # API route handlers
@@ -67,10 +68,11 @@ POST /api/v1/upload  (multipart video file)
   │  _process_meeting_video()  (background)             │
   │                                                     │
   │  1. Extract audio  ──ffmpeg──→ mono 16kHz WAV      │
-  │  2. Transcribe     ──faster-whisper──→ segments    │
-  │  3. Diarize        ──pyannote.audio──→ speaker turns│
-  │  4. Merge          ──overlap matching──→ labeled    │
-  │  5. Persist segments & update status                │
+  │  2. VAD             ──Silero VAD──→ speech regions  │
+  │  3. Transcribe     ──faster-whisper──→ segments    │
+  │  4. Diarize        ──pyannote.audio──→ speaker turns│
+  │  5. Merge          ──overlap matching──→ labeled    │
+  │  6. Persist segments & update status                │
   │                                                     │
   │  On failure → status = failed, error saved          │
   │  Finally    → temp WAV deleted                      │
@@ -85,6 +87,7 @@ POST /api/v1/upload  (multipart video file)
 | Stage | File | Dependencies |
 |---|---|---|
 | Audio Extraction | `app/transcription.py:88-114` | `ffmpeg` (system) |
+| VAD | `app/vad.py:42-81` | Silero VAD (`torch.hub`) — gated by `ENABLE_VAD` (default `true`) |
 | Transcription | `app/transcription.py:51-85` | `faster-whisper` model (cached on first run) |
 | Diarization | `app/diarization.py:54-101` | `pyannote.audio` + HuggingFace token (optional) |
 | Merge | `app/merge.py:7-29` | Output of transcription + diarization |
@@ -130,6 +133,7 @@ Relationship: `Meeting` has a one-to-many relationship with `TranscriptSegment`,
 | Method | Path | Returns | Statuses |
 |---|---|---|---|
 | POST | `/api/v1/upload` | `{meeting_id, video_id, message}` | Background processing starts |
+| POST | `/api/v1/upload-and-diarize` | `{meeting_id, video_id, transcript, segments[], ...}` | Synchronous — blocks until processing complete |
 | GET | `/api/v1/meetings/{meeting_id}` | `{meeting_id, video_id, filename, statuses, created_at}` | — |
 | GET | `/api/v1/meetings/{meeting_id}/transcript` | `{meeting_id, status, language, transcript_text, error}` | pending → processing → completed/failed |
 | GET | `/api/v1/meetings/{meeting_id}/segments` | `{meeting_id, statuses, segments[]}` | Full segment list with speaker labels |
@@ -158,9 +162,12 @@ All settings have sensible defaults and can be overridden via environment variab
 |---|---|---|---|
 | `transcriber_provider` | `TRANSCRIBER_PROVIDER` | `local` | `local` \| `hosted` |
 | `whisper_model` | `WHISPER_MODEL` | `small` | `tiny` \| `base` \| `small` \| `medium` \| `large-v3` |
-| `whisper_device` | `WHISPER_DEVICE` | `cpu` | `cpu` \| `cuda` |
+| `whisper_device` | `WHISPER_DEVICE` | auto-detect | `cpu` or `cuda` — auto-detects CUDA if available |
 | `diarizer_provider` | `DIARIZER_PROVIDER` | `local` | `local` \| `hosted` |
+| `diarization_device` | `DIARIZATION_DEVICE` | auto-detect | `cpu` or `cuda` for pyannote pipeline |
 | `hf_token` | `HF_TOKEN` | `None` | HuggingFace token for pyannote |
+| `enable_vad` | `ENABLE_VAD` | `true` | Toggle Silero VAD pre-filtering |
+| `batch_size` | `INFERENCE_BATCH_SIZE` | `8` | GPU batch size for batched inference |
 
 ### Provider System
 

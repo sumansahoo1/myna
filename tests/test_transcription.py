@@ -43,21 +43,23 @@ class TestHostedTranscriberStub:
 
 class TestGetTranscriber:
     def test_local_returns_local_transcriber(self, monkeypatch):
-        monkeypatch.setenv("TRANSCRIBER_PROVIDER", "local")
+        monkeypatch.setattr("app.transcription.settings.transcriber_provider", "local")
         result = get_transcriber()
         assert isinstance(result, LocalFasterWhisperTranscriber)
 
     def test_hosted_returns_stub(self, monkeypatch):
-        monkeypatch.setenv("TRANSCRIBER_PROVIDER", "hosted")
+        monkeypatch.setattr("app.transcription.settings.transcriber_provider", "hosted")
         result = get_transcriber()
         assert isinstance(result, HostedTranscriberStub)
 
     def test_default_is_local(self, monkeypatch):
-        monkeypatch.delenv("TRANSCRIBER_PROVIDER", raising=False)
+        monkeypatch.setattr("app.transcription.settings.transcriber_provider", "local")
         result = get_transcriber()
         assert isinstance(result, LocalFasterWhisperTranscriber)
 
     def test_unknown_provider_raises_value_error(self, monkeypatch):
-        monkeypatch.setenv("TRANSCRIBER_PROVIDER", "nonexistent")
+        monkeypatch.setattr(
+            "app.transcription.settings.transcriber_provider", "nonexistent"
+        )
         with pytest.raises(ValueError, match="Unknown transcriber provider"):
             get_transcriber()
