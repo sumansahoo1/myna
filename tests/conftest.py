@@ -135,7 +135,7 @@ def tmp_video_dir(monkeypatch, tmp_path) -> Path:
 def mock_transcriber():
     """Returns a Transcriber mock that produces known segments."""
     mock = MagicMock()
-    mock.transcribe.return_value = TranscriptResult(
+    result = TranscriptResult(
         text="Hello world. Hi there.",
         language="en",
         segments=[
@@ -143,6 +143,8 @@ def mock_transcriber():
             TS(start_sec=1.5, end_sec=3.0, text="Hi there."),
         ],
     )
+    mock.transcribe.return_value = result
+    mock.transcribe_batched.return_value = result
     return mock
 
 

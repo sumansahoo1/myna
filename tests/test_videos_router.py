@@ -249,7 +249,10 @@ class TestProcessMeetingVideo:
             {
                 "transcribe": lambda self, p: (_ for _ in ()).throw(
                     RuntimeError("model crashed")
-                )
+                ),
+                "transcribe_batched": lambda self, p, speech_regions=None, language=None: (
+                    (_ for _ in ()).throw(RuntimeError("model crashed"))
+                ),
             },
         )()
 
@@ -385,7 +388,7 @@ class TestProcessMeetingVideo:
     def test_chunking_failure_falls_back(
         self, db, tmp_video_dir, mock_transcriber, mock_diarizer
     ):
-        """split_audio fails → falls back to single-file transcription."""
+        """When ENABLE_CHUNKING is False, falls back to single-file transcribe."""
         from app.routers.videos import _process_meeting_video
 
         meeting = Meeting(
@@ -404,11 +407,7 @@ class TestProcessMeetingVideo:
         with (
             patch("app.routers.videos.get_db", override_get_db),
             patch("app.routers.videos._extract_audio_to_wav", return_value=fake_wav),
-            patch("app.routers.videos.settings.enable_chunking", True),
-            patch(
-                "app.routers.videos.split_audio",
-                side_effect=RuntimeError("ffprobe fail"),
-            ),
+            patch("app.routers.videos.settings.enable_chunking", False),
             patch("app.routers.videos.get_transcriber", return_value=mock_transcriber),
             patch("app.routers.videos.get_diarizer", return_value=mock_diarizer),
         ):
@@ -420,9 +419,8 @@ class TestProcessMeetingVideo:
         mock_transcriber.transcribe.assert_called_once_with(fake_wav)
 
     def test_chunked_transcription_path(self, db, tmp_video_dir, mock_diarizer):
-        """When chunking enabled and audio long enough, uses transcribe_chunks."""
+        """When ENABLE_CHUNKING is True, uses transcribe_batched."""
         from app.routers.videos import _process_meeting_video
-        from app.chunking import AudioChunk
 
         meeting = Meeting(
             meeting_id=str(uuid.uuid4()),
@@ -437,50 +435,36 @@ class TestProcessMeetingVideo:
         fake_wav = tmp_video_dir / "audio.wav"
         fake_wav.write_text("")
 
-        chunk_wavs = [tmp_video_dir / f"chunk_{i}.wav" for i in range(3)]
-        for cw in chunk_wavs:
-            cw.write_text("")
-
-        test_chunks = [
-            AudioChunk(i, i * 25.0, (i + 1) * 25.0, 25.0, cw)
-            for i, cw in enumerate(chunk_wavs)
-        ]
-
-        chunked_transcriber = MagicMock()
-        chunked_transcriber.transcribe_chunks.return_value = [
-            TranscriptResult("a", "en", [TS(i * 25, i * 25 + 5, f"seg{i}")])
-            for i in range(3)
-        ]
+        batched_transcriber = MagicMock()
+        batched_transcriber.transcribe_batched.return_value = TranscriptResult(
+            "full",
+            "en",
+            [
+                TS(0, 5, "seg0"),
+                TS(25, 30, "seg1"),
+                TS(50, 55, "seg2"),
+            ],
+        )
 
         with (
             patch("app.routers.videos.get_db", override_get_db),
             patch("app.routers.videos._extract_audio_to_wav", return_value=fake_wav),
             patch("app.routers.videos.settings.enable_chunking", True),
             patch("app.routers.videos.settings.enable_vad", False),
-            patch("app.routers.videos.split_audio", return_value=test_chunks),
             patch(
-                "app.routers.videos.get_transcriber", return_value=chunked_transcriber
+                "app.routers.videos.get_transcriber", return_value=batched_transcriber
             ),
             patch("app.routers.videos.get_diarizer", return_value=mock_diarizer),
-            patch("app.routers.videos.stitch_transcripts") as mock_stitch,
         ):
-            mock_stitch.return_value = TranscriptResult(
-                "full",
-                "en",
-                [
-                    TS(0, 5, "seg0"),
-                    TS(25, 30, "seg1"),
-                    TS(50, 55, "seg2"),
-                ],
-            )
             _process_meeting_video(meeting.meeting_id)
 
         db.expire_all()
         db.refresh(meeting)
         assert meeting.transcription_status == TranscriptionStatus.completed
-        # transcribe_chunks must have been called (not transcribe)
-        chunked_transcriber.transcribe_chunks.assert_called_once_with(test_chunks)
-        chunked_transcriber.transcribe.assert_not_called()
+        assert meeting.transcript_text == "full"
+        assert meeting.transcript_language == "en"
+        batched_transcriber.transcribe_batched.assert_called_once()
+        batched_transcriber.transcribe.assert_not_called()
 
     def test_parallel_execution_both_complete(
         self, db, tmp_video_dir, mock_transcriber, mock_diarizer
@@ -513,7 +497,7 @@ class TestProcessMeetingVideo:
         db.refresh(meeting)
         assert meeting.transcription_status == TranscriptionStatus.completed
         assert meeting.diarization_status == TranscriptionStatus.completed
-        mock_transcriber.transcribe.assert_called_once()
+        mock_transcriber.transcribe_batched.assert_called_once()
         mock_diarizer.diarize.assert_called_once()
 
     def test_temp_files_cleaned_on_success(
