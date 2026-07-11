@@ -131,14 +131,18 @@ class LocalFasterWhisperTranscriber(Transcriber):
         model = self._get_model()
         pipeline = BatchedInferencePipeline(model)
 
-        kwargs: dict = {"batch_size": settings.chunk_batch_size}
+        kwargs: dict = {"batch_size": settings.batch_size}
 
         if speech_regions:
-            sampling_rate = 16000
+            # Read actual sample rate from WAV metadata (cheap, no decode)
+            import wave
+
+            with wave.open(str(audio_path), "rb") as wf:
+                actual_sr = wf.getframerate()
             clip_timestamps = [
                 {
-                    "start": int(r.start_sec * sampling_rate),
-                    "end": int(r.end_sec * sampling_rate),
+                    "start": int(r.start_sec * actual_sr),
+                    "end": int(r.end_sec * actual_sr),
                 }
                 for r in speech_regions
             ]

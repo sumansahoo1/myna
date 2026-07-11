@@ -31,7 +31,7 @@ ENV TRANSCRIBER_PROVIDER=local
 ENV DIARIZER_PROVIDER=local
 
 EXPOSE 8000
-ENTRYPOINT ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+ENTRYPOINT ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
 
 # ── GPU target (NVIDIA CUDA) ─────────────────────────────────────────────
@@ -69,4 +69,4 @@ ENV TRANSCRIBER_PROVIDER=local
 ENV DIARIZER_PROVIDER=local
 
 EXPOSE 8000
-ENTRYPOINT ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+ENTRYPOINT ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

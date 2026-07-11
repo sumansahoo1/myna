@@ -46,13 +46,6 @@ def _env_bool(name: str, default: bool) -> bool:
     return val.strip().lower() in ("1", "true", "yes", "on")
 
 
-def _env_float(name: str, default: float) -> float:
-    val = os.getenv(name)
-    if val is None:
-        return default
-    return float(val)
-
-
 def _env_int(name: str, default: int) -> int:
     val = os.getenv(name)
     if val is None:
@@ -72,7 +65,7 @@ class Settings:
     # VAD
     enable_vad: bool = _env_bool("ENABLE_VAD", True)
     # Batched inference
-    chunk_batch_size: int = _env_int("CHUNK_BATCH_SIZE", 8)
+    batch_size: int = _env_int("INFERENCE_BATCH_SIZE", 8)
 
 
 settings = Settings()

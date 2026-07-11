@@ -28,7 +28,7 @@ Single FastAPI app (`app.main:app`). `app/routers/videos.py` holds all endpoints
 
 Processing pipeline: **VAD → batched transcribe + diarize (parallel) → merge → persist**.
 - `ENABLE_VAD` env var toggles VAD pre-filtering (default `true`).
-- Transcription always uses `BatchedInferencePipeline` (GPU-batched). Batch size via `CHUNK_BATCH_SIZE` (default 8).
+- Transcription always uses `BatchedInferencePipeline` (GPU-batched). Batch size via `INFERENCE_BATCH_SIZE` (default 8).
 - Pipeline runs via FastAPI `BackgroundTasks` (same process, no external queue).
 
 Provider pattern: `get_transcriber()` / `get_diarizer()` select `local` or `hosted` based on env vars. `hosted` provider stubs raise `RuntimeError` — not implemented.
@@ -39,7 +39,7 @@ Provider pattern: `get_transcriber()` / `get_diarizer()` select `local` or `host
 
 - `HF_TOKEN` — without it, diarization uses `NoopDiarizer` (all speakers = `UNKNOWN`).
 - `WHISPER_DEVICE` auto-detects CUDA via `torch.cuda.is_available()` when not set.
-- `CHUNK_BATCH_SIZE` sets GPU batch size for BatchedInferencePipeline (default 8).
+- `INFERENCE_BATCH_SIZE` sets GPU batch size for BatchedInferencePipeline (default 8).
 
 ## Database
 
