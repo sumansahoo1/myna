@@ -298,45 +298,94 @@ def _process_meeting_video(meeting_id: str) -> None:
             fut_transcribe = executor.submit(
                 transcriber.transcribe_batched, audio_path, speech_regions
             )
-
             fut_diarize = executor.submit(diarizer.diarize, audio_path)
 
-            transcript_result: TranscriptResult = fut_transcribe.result()
-            speaker_turns: list = fut_diarize.result()
+            # Collect each result independently so one failure doesn't discard the other.
+            transcript_ok = False
+            diarize_ok = False
+            transcript_result = None
+            speaker_turns = None
 
-            meeting.transcription_status = TranscriptionStatus.completed
-            meeting.transcript_text = transcript_result.text
-            meeting.transcript_language = transcript_result.language
-            meeting.diarization_status = TranscriptionStatus.completed
+            try:
+                transcript_result = fut_transcribe.result()
+                meeting.transcription_status = TranscriptionStatus.completed
+                meeting.transcript_text = transcript_result.text
+                meeting.transcript_language = transcript_result.language
+                transcript_ok = True
+            except Exception as e:
+                logger.error(
+                    "_process_meeting_video: meeting_id=%s transcription failed: %s",
+                    meeting_id,
+                    e,
+                )
+                meeting.transcription_status = TranscriptionStatus.failed
+                meeting.transcript_error = str(e)
+
+            try:
+                speaker_turns = fut_diarize.result()
+                meeting.diarization_status = TranscriptionStatus.completed
+                diarize_ok = True
+            except Exception as e:
+                logger.error(
+                    "_process_meeting_video: meeting_id=%s diarization failed: %s",
+                    meeting_id,
+                    e,
+                )
+                meeting.diarization_status = TranscriptionStatus.failed
+                meeting.diarization_error = str(e)
+
             db.commit()
-            logger.info(
-                "_process_meeting_video: meeting_id=%s transcription done language=%s segments=%d",
-                meeting_id,
-                transcript_result.language,
-                len(transcript_result.segments),
-            )
-            logger.info(
-                "_process_meeting_video: meeting_id=%s diarization done speakers=%d",
-                meeting_id,
-                len(set(t.speaker_label for t in speaker_turns)),
-            )
+
+            if transcript_ok:
+                logger.info(
+                    "_process_meeting_video: meeting_id=%s transcription done language=%s segments=%d",
+                    meeting_id,
+                    transcript_result.language,
+                    len(transcript_result.segments),
+                )
+            if diarize_ok:
+                logger.info(
+                    "_process_meeting_video: meeting_id=%s diarization done speakers=%d",
+                    meeting_id,
+                    len(set(t.speaker_label for t in speaker_turns)),
+                )
 
         # --- merge & persist segments ---
-        logger.info(
-            "_process_meeting_video: meeting_id=%s merging segments with speakers",
-            meeting_id,
-        )
-        merged = assign_speakers(transcript_result.segments, speaker_turns)
+        if transcript_ok and diarize_ok:
+            logger.info(
+                "_process_meeting_video: meeting_id=%s merging segments with speakers",
+                meeting_id,
+            )
+            merged = assign_speakers(transcript_result.segments, speaker_turns)
+        elif transcript_ok:
+            logger.info(
+                "_process_meeting_video: meeting_id=%s persisting transcript-only segments (no diarization)",
+                meeting_id,
+            )
+            merged = [
+                {
+                    "start_sec": seg.start_sec,
+                    "end_sec": seg.end_sec,
+                    "text": seg.text,
+                    "speaker_label": "UNKNOWN",
+                }
+                for seg in transcript_result.segments
+            ]
+        else:
+            merged = []
 
-        db.query(SegmentModel).filter(SegmentModel.meeting_id == meeting_id).delete()
-        for row in merged:
-            db.add(SegmentModel(meeting_id=meeting_id, **row))
-        db.commit()
-        logger.info(
-            "_process_meeting_video: meeting_id=%s persisted %d segments",
-            meeting_id,
-            len(merged),
-        )
+        if merged:
+            db.query(SegmentModel).filter(
+                SegmentModel.meeting_id == meeting_id
+            ).delete()
+            for row in merged:
+                db.add(SegmentModel(meeting_id=meeting_id, **row))
+            db.commit()
+            logger.info(
+                "_process_meeting_video: meeting_id=%s persisted %d segments",
+                meeting_id,
+                len(merged),
+            )
 
     except Exception as e:
         logger.error("_process_meeting_video: meeting_id=%s FAILED: %s", meeting_id, e)

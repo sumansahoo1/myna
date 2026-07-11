@@ -312,9 +312,8 @@ class TestProcessMeetingVideo:
 
         db.expire_all()
         db.refresh(meeting)
-        # Both statuses are committed atomically — if diarization fails,
-        # neither is marked completed
-        assert meeting.transcription_status == TranscriptionStatus.failed
+        # Transcription succeeds independently; only diarization is marked failed
+        assert meeting.transcription_status == TranscriptionStatus.completed
         assert meeting.diarization_status == TranscriptionStatus.failed
 
     def test_vad_no_speech_short_circuits(self, db, tmp_video_dir):
