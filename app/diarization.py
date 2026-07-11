@@ -25,7 +25,7 @@ def get_diarizer() -> Diarizer:
     provider = settings.diarizer_provider.strip().lower()
     hf_token = (settings.hf_token or "").strip()
 
-    device = settings.whisper_device
+    device = settings.diarization_device
 
     if provider == "local":
         if not hf_token:

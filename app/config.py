@@ -60,6 +60,7 @@ class Settings:
     transcriber_provider: str = os.getenv("TRANSCRIBER_PROVIDER", "local")
     whisper_model: str = os.getenv("WHISPER_MODEL", "small")
     whisper_device: str = os.getenv("WHISPER_DEVICE") or _detect_device()
+    diarization_device: str = os.getenv("DIARIZATION_DEVICE") or _detect_device()
     diarizer_provider: str = os.getenv("DIARIZER_PROVIDER", "local")
     hf_token: str | None = os.getenv("HF_TOKEN") or None
     # VAD
