@@ -12,7 +12,9 @@ WORKDIR /app
 COPY requirements.txt .
 
 # Install PyTorch CPU-only to keep image small
-RUN pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir \
+    torch==2.3.1 torchaudio==2.3.1 \
+    --index-url https://download.pytorch.org/whl/cpu
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Patch pyannote.audio: use_auth_token → token for hf_hub_download compatibility

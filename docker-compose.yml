@@ -22,9 +22,8 @@ services:
       - WHISPER_DEVICE=${WHISPER_DEVICE:-}
       - TRANSCRIBER_PROVIDER=${TRANSCRIBER_PROVIDER:-local}
       - DIARIZER_PROVIDER=${DIARIZER_PROVIDER:-local}
-      # Phase 1: chunking / VAD toggles
+      # Phase 1: VAD toggle
       - ENABLE_VAD=${ENABLE_VAD:-true}
-      - ENABLE_CHUNKING=${ENABLE_CHUNKING:-true}
       # Optional overrides for storage paths (defaults use /app/storage/)
       - STORAGE_DIR=${STORAGE_DIR:-}
       - DATABASE_URL=${DATABASE_URL:-}
@@ -41,7 +40,7 @@ services:
         limits:
           memory: 4G
           cpus: "2"
-    profiles: [""]
+    profiles: [cpu]
 
   api-gpu:
     build:
@@ -64,7 +63,6 @@ services:
       - TRANSCRIBER_PROVIDER=${TRANSCRIBER_PROVIDER:-local}
       - DIARIZER_PROVIDER=${DIARIZER_PROVIDER:-local}
       - ENABLE_VAD=${ENABLE_VAD:-true}
-      - ENABLE_CHUNKING=${ENABLE_CHUNKING:-true}
       - STORAGE_DIR=${STORAGE_DIR:-}
       - DATABASE_URL=${DATABASE_URL:-}
     restart: unless-stopped
