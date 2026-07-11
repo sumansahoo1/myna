@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+import torch
+
 logger = logging.getLogger(__name__)
 
 
@@ -22,8 +24,6 @@ def _load_vad():
     global _VAD_MODEL, _VAD_UTILS
     if _VAD_MODEL is not None:
         return _VAD_MODEL, _VAD_UTILS
-
-    import torch
 
     logger.info("loading Silero VAD model")
     model, utils = torch.hub.load(
@@ -80,7 +80,6 @@ def detect_speech_regions(
 
 
 def _read_audio_manual(path: Path) -> "torch.Tensor":
-    import torch
     import torchaudio
 
     waveform, sr = torchaudio.load(str(path))

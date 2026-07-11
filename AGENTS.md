@@ -12,7 +12,7 @@ source .venv/bin/activate
 python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 # Docker (CPU target by default; BUILD_TARGET=gpu for CUDA)
-docker compose up           # CPU
+docker compose --profile cpu up   # CPU
 docker compose --profile gpu up   # GPU
 
 # Run all tests
@@ -28,8 +28,7 @@ Single FastAPI app (`app.main:app`). `app/routers/videos.py` holds all endpoints
 
 Processing pipeline: **VAD → batched transcribe + diarize (parallel) → merge → persist**.
 - `ENABLE_VAD` env var toggles VAD pre-filtering (default `true`).
-- `ENABLE_CHUNKING` toggles BatchedInferencePipeline (GPU-batched) vs single-file transcription (default `true`).
-- Transcription (BatchedInferencePipeline or single-file) + diarization run in `ThreadPoolExecutor(max_workers=2)` — wall-clock = max of the two.
+- Transcription always uses `BatchedInferencePipeline` (GPU-batched). Batch size via `CHUNK_BATCH_SIZE` (default 8).
 - Pipeline runs via FastAPI `BackgroundTasks` (same process, no external queue).
 
 Provider pattern: `get_transcriber()` / `get_diarizer()` select `local` or `hosted` based on env vars. `hosted` provider stubs raise `RuntimeError` — not implemented.
@@ -40,7 +39,7 @@ Provider pattern: `get_transcriber()` / `get_diarizer()` select `local` or `host
 
 - `HF_TOKEN` — without it, diarization uses `NoopDiarizer` (all speakers = `UNKNOWN`).
 - `WHISPER_DEVICE` auto-detects CUDA via `torch.cuda.is_available()` when not set.
-- `CHUNK_DURATION_SEC`, `CHUNK_OVERLAP_SEC`, `CHUNK_BATCH_SIZE` tune chunking behavior.
+- `CHUNK_BATCH_SIZE` sets GPU batch size for BatchedInferencePipeline (default 8).
 
 ## Database
 
@@ -50,7 +49,7 @@ SQLite at `storage/meetings.db` (auto-created on startup). **No Alembic** — ma
 
 ## Gotchas
 
-- **ffmpeg AND ffprobe must be on PATH.** `chunking.py` uses ffprobe for duration detection.
+- **ffmpeg AND ffprobe must be on PATH.** Used for audio extraction and duration detection.
 - **Dockerfile patches pyannote.audio source files** (`use_auth_token` → `token`). If pyannote version changes, verify the patch still works.
 - **`storage/` is gitignored.** DB, uploaded videos, temp WAVs never committed.
 - **Logging timestamps configured to IST** in `app/main.py:_ist_converter`.
