@@ -25,7 +25,7 @@ def get_diarizer() -> Diarizer:
     provider = settings.diarizer_provider.strip().lower()
     hf_token = (settings.hf_token or "").strip()
 
-    device = _detect_diarization_device()
+    device = settings.whisper_device
 
     if provider == "local":
         if not hf_token:
@@ -41,17 +41,6 @@ def get_diarizer() -> Diarizer:
         logger.info("diarizer: hosted stub selected")
         return HostedDiarizerStub()
     raise ValueError(f"Unknown diarizer provider: {provider}")
-
-
-def _detect_diarization_device() -> str:
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            return "cuda"
-    except ImportError:
-        pass
-    return "cpu"
 
 
 class NoopDiarizer(Diarizer):
